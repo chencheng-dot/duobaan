@@ -333,4 +333,18 @@ MIT
 - 修正设置页中「dev.qweather.com/docs/api/geo/city-lookup/」404 链接，改为直接使用中文城市名 + 前端可视化输入
 - 前端构建产物 123.95 kB（gzip 46.44 kB），后端 44 源文件全部编译通过
 
+**6. 天气显示 Bug 修复（commit 0a14596）**
+- **现象**：即使未配置天气 Key，右上角依然显示「晴 —℃ / 体感—℃」+ 太阳图标，保存天气配置并刷新浏览器后也仍保持该错误状态。
+- **根因**：
+  1. 后端 `WeatherNow.placeholder()` 里 `text` 被硬编码为 **"晴"**，与真实的"晴天"无法区分，导致前端天气图标匹配逻辑（/晴/.test(text)）直接命中 sunny。
+  2. 前端 `TopBar.vue` 没有"未配置态"与"真实态"的区分字段，只按文本判断图标。
+  3. 天气只在 `onMounted` 拉一次，保存配置后后端仍在运行旧进程（`/api/config/weather` 运行时配置 + GeoAPI 城市解析代码未生效）。
+- **修复方式**：
+  - 后端 [WeatherNow.java](src/main/java/org/example/duobaan/model/dto/WeatherNow.java) 新增 `configured: boolean` 字段（真实查询 = true，占位 = false）；占位 `text/temp/feelsLike` 全部改为 `"—"`。
+  - 前端 [TopBar.vue](src/components/TopBar.vue) 根据 `configured` 切换 UI：
+    - `false` → 虚线边框 + 灰文字 + ❓图标，显示 **「未配置天气 / 前往「设置」配置 Key」**，点击跳转到设置页。
+    - `true` → 正常展示 7 种 SVG 天气图标 + 温度/体感，点击**立即手动刷新**；额外每 **60 秒** 自动轮询，无需手动刷浏览器（最多 1 分钟生效）。
+  - 更新了 `/api/config/weather` 配置变更 → `WeatherService` 自动清缓存，下次请求重新走 GeoAPI + /v7/weather/now。
+- **升级注意**：从 v2.0 升级的用户请务必**重启后端进程**（否则运行的还是旧 class，`configured` 字段和天气配置持久化都不会生效，表现为"已保存天气配置但右上角不变"）。
+
 ---
