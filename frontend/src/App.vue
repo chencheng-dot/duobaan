@@ -1,19 +1,16 @@
 <script setup>
+import { RouterView } from 'vue-router'
 import TopBar from './components/TopBar.vue'
 import SideRail from './components/SideRail.vue'
-import { usePublicData } from './composables/usePublicData.js'
-
-// 启动后即开始拉取时间与天气
-usePublicData()
 </script>
 
 <template>
   <div class="shell">
-    <TopBar />
+    <header class="topbar-wrap"><TopBar /></header>
     <div class="body">
       <SideRail />
-      <main class="main">
-        <router-view />
+      <main class="content">
+        <RouterView />
       </main>
     </div>
   </div>
@@ -21,19 +18,30 @@ usePublicData()
 
 <style scoped>
 .shell {
+  height: 100%;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  background: #FFFFFF;
+}
+.topbar-wrap {
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 .body {
   flex: 1;
+  min-height: 0;
   display: flex;
-  gap: 12px;
-  padding: 12px;
-  overflow: hidden;
+  gap: 16px;
+  padding: 16px;
+  background: #FFFFFF;
 }
-.main {
+.content {
   flex: 1;
-  overflow: auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
 }
 </style>

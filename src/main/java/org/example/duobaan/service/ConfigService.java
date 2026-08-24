@@ -13,13 +13,14 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * 系统配置服务：负责大模型提供商等配置的持久化与读取。
+ * 系统配置服务：负责大模型/天气等配置的持久化与读取。
  * 优先级：数据库配置 > application.properties 默认值。
  */
 @Service
 public class ConfigService {
 
     private static final String LLM_CONFIG_KEY = "llm.config";
+    private static final String WEATHER_CONFIG_KEY = "weather.config";
 
     private final SystemConfigRepository repo;
     private final DuobaanProperties props;
@@ -87,5 +88,37 @@ public class ConfigService {
      * 提供商预设：用于前端下拉选择时自动填充 baseUrl 和默认 model。
      */
     public record ProviderPreset(String code, String name, String baseUrl, String defaultModel) {
+    }
+
+    // === 天气配置 ===
+
+    public org.example.duobaan.model.dto.WeatherConfigDTO getWeatherConfig() {
+        Optional<SystemConfig> saved = repo.findByKey(WEATHER_CONFIG_KEY);
+        if (saved.isPresent()) {
+            try {
+                return objectMapper.readValue(saved.get().getValue(),
+                        org.example.duobaan.model.dto.WeatherConfigDTO.class);
+            } catch (Exception ignore) {
+            }
+        }
+        DuobaanProperties.Weather w = props.getWeather();
+        return new org.example.duobaan.model.dto.WeatherConfigDTO(
+                w.getProvider(), w.getApiKey(), w.getLocation(), w.getCacheTtlSeconds());
+    }
+
+    @Transactional
+    public org.example.duobaan.model.dto.WeatherConfigDTO saveWeatherConfig(
+            org.example.duobaan.model.dto.WeatherConfigDTO dto) {
+        try {
+            String json = objectMapper.writeValueAsString(dto);
+            SystemConfig cfg = repo.findByKey(WEATHER_CONFIG_KEY)
+                    .orElseGet(() -> new SystemConfig(WEATHER_CONFIG_KEY, json));
+            cfg.setValue(json);
+            cfg.setUpdatedAt(java.time.LocalDateTime.now());
+            repo.save(cfg);
+            return dto;
+        } catch (Exception e) {
+            throw new RuntimeException("保存天气配置失败：" + e.getMessage(), e);
+        }
     }
 }

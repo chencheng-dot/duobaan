@@ -1,36 +1,46 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { getLlmConfig, saveLlmConfig, getProviders } from '../api'
+import {
+  getLlmConfig, saveLlmConfig, getProviders,
+  getWeatherConfig, saveWeatherConfig
+} from '../api'
 
+const tab = ref('llm') // 'llm' | 'weather'
+
+// --- 大模型 ---
 const providers = ref([])
-const config = ref({
-  provider: 'DEEPSEEK',
-  baseUrl: '',
-  apiKey: '',
-  model: '',
-  timeoutSeconds: 30
-})
+const llmCfg = ref({ provider: 'CHATGPT', baseUrl: '', apiKey: '', model: '', timeoutSeconds: 30 })
+const llmSaving = ref(false)
+const llmSaved = ref(false)
+
+// --- 天气 ---
+const weatherCfg = ref({ provider: 'qweather', apiKey: '', location: '北京', cacheTtlSeconds: 600 })
+const weatherSaving = ref(false)
+const weatherSaved = ref(false)
 
 const loading = ref(true)
-const saving = ref(false)
-const saved = ref(false)
 const errorMsg = ref('')
 
-async function loadConfig() {
+async function load() {
   try {
     loading.value = true
-    const [cfg, provs] = await Promise.all([getLlmConfig(), getProviders()])
-    config.value = {
-      provider: cfg.provider || 'CUSTOM',
-      baseUrl: cfg.baseUrl || '',
-      apiKey: cfg.apiKey || '',
-      model: cfg.model || '',
-      timeoutSeconds: cfg.timeoutSeconds || 30
+    const [llm, provs, wth] = await Promise.all([
+      getLlmConfig(), getProviders(), getWeatherConfig()
+    ])
+    llmCfg.value = {
+      provider: llm.provider || 'CHATGPT',
+      baseUrl: llm.baseUrl || '',
+      apiKey: llm.apiKey || '',
+      model: llm.model || '',
+      timeoutSeconds: llm.timeoutSeconds || 30
     }
     providers.value = provs
-    // 如果是 CUSTOM 但没有值，自动选一个预设
-    if (!config.value.baseUrl) {
-      applyPreset('DEEPSEEK')
+    if (!llmCfg.value.baseUrl) applyPreset('CHATGPT')
+    weatherCfg.value = {
+      provider: wth.provider || 'qweather',
+      apiKey: wth.apiKey || '',
+      location: wth.location || '北京',
+      cacheTtlSeconds: wth.cacheTtlSeconds || 600
     }
   } catch (e) {
     errorMsg.value = '加载配置失败：' + e.message
@@ -42,168 +52,174 @@ async function loadConfig() {
 function applyPreset(code) {
   const preset = providers.value.find(p => p.code === code)
   if (preset) {
-    config.value.provider = code
-    if (preset.baseUrl) config.value.baseUrl = preset.baseUrl
-    if (preset.defaultModel) config.value.model = preset.defaultModel
+    llmCfg.value.provider = code
+    if (preset.baseUrl) llmCfg.value.baseUrl = preset.baseUrl
+    if (preset.defaultModel) llmCfg.value.model = preset.defaultModel
   }
 }
 
-function onProviderChange(e) {
-  const code = e.target.value
-  applyPreset(code)
-  saved.value = false
-}
-
-async function save() {
+async function saveLlm() {
   try {
-    saving.value = true
-    saved.value = false
-    errorMsg.value = ''
-    await saveLlmConfig({
-      provider: config.value.provider,
-      baseUrl: config.value.baseUrl,
-      apiKey: config.value.apiKey,
-      model: config.value.model,
-      timeoutSeconds: config.value.timeoutSeconds
-    })
-    saved.value = true
-    setTimeout(() => { saved.value = false }, 3000)
+    llmSaving.value = true; llmSaved.value = false
+    await saveLlmConfig(llmCfg.value)
+    llmSaved.value = true
+    setTimeout(() => { llmSaved.value = false }, 2500)
   } catch (e) {
     errorMsg.value = '保存失败：' + e.message
   } finally {
-    saving.value = false
+    llmSaving.value = false
   }
 }
 
-const isConfigured = computed(() => config.value.apiKey && config.value.apiKey.length > 0)
+async function saveWeather() {
+  try {
+    weatherSaving.value = true; weatherSaved.value = false
+    await saveWeatherConfig(weatherCfg.value)
+    weatherSaved.value = true
+    setTimeout(() => { weatherSaved.value = false }, 2500)
+  } catch (e) {
+    errorMsg.value = '保存失败：' + e.message
+  } finally {
+    weatherSaving.value = false
+  }
+}
 
-onMounted(loadConfig)
+const llmReady = computed(() => llmCfg.value.apiKey && llmCfg.value.apiKey.length > 0)
+const weatherReady = computed(() => weatherCfg.value.apiKey && weatherCfg.value.apiKey.length > 0)
+
+onMounted(load)
 </script>
 
 <template>
   <div class="settings">
-    <!-- 页面头部 -->
-    <section class="page-header">
-      <div class="header-icon">⚙️</div>
-      <div>
-        <h1>大模型配置</h1>
-        <p class="subtitle">选择你偏好的 AI 提供商，输入 API Key，保存后即可在对话和拆单中使用</p>
+    <!-- 标题 -->
+    <section class="title-row">
+      <div class="title-text">
+        <h1>系统设置</h1>
+        <p class="sub">配置大模型与天气服务 API</p>
       </div>
-      <div class="status-badge" :class="{ ready: isConfigured }">
-        {{ isConfigured ? '✓ 已配置' : '○ 未配置' }}
-      </div>
+      <div class="title-line"></div>
     </section>
 
-    <div v-if="loading" class="loading-state">⏳ 加载中…</div>
+    <!-- Tab -->
+    <div class="tabs">
+      <div class="tab" :class="{ active: tab === 'llm' }" @click="tab = 'llm'">
+        大模型
+        <span class="dot" v-if="llmReady"></span>
+      </div>
+      <div class="tab" :class="{ active: tab === 'weather' }" @click="tab = 'weather'">
+        天气服务
+        <span class="dot" v-if="weatherReady"></span>
+      </div>
+    </div>
 
-    <template v-else>
-      <!-- 选择提供商 -->
+    <div v-if="loading" class="loading-state">加载中…</div>
+
+    <!-- ============ 大模型 Tab ============ -->
+    <template v-if="tab === 'llm' && !loading">
       <section class="config-card">
-        <h2 class="card-title">🔌 选择 AI 提供商</h2>
+        <h2 class="card-title">选择提供商</h2>
         <div class="provider-grid">
           <div
             v-for="p in providers"
             :key="p.code"
             class="provider-card"
-            :class="{ active: config.provider === p.code }"
-            @click="applyPreset(p.code)"
+            :class="{ active: llmCfg.provider === p.code }"
+            @click="applyPreset(p.code); llmSaved = false"
           >
             <div class="provider-name">{{ p.name }}</div>
             <div class="provider-url" v-if="p.baseUrl">{{ p.baseUrl.replace('https://', '') }}</div>
             <div class="provider-url muted" v-else>自定义</div>
-            <div class="provider-check" v-if="config.provider === p.code">✓</div>
           </div>
         </div>
       </section>
 
-      <!-- 详细配置 -->
       <section class="config-card">
-        <h2 class="card-title">🔧 连接配置</h2>
-
+        <h2 class="card-title">连接配置</h2>
         <div class="config-item">
           <label class="lbl">API Base URL</label>
-          <input
-            v-model="config.baseUrl"
-            placeholder="如 https://api.deepseek.com/v1"
-            @input="saved = false"
-          />
-          <p class="hint" v-if="config.provider && config.provider !== 'CUSTOM'">
-            {{ providers.find(p => p.code === config.provider)?.baseUrl }}（预设值，可修改）
+          <input v-model="llmCfg.baseUrl" placeholder="如 https://api.openai.com/v1" @input="llmSaved = false" />
+          <p class="hint" v-if="llmCfg.provider && llmCfg.provider !== 'CUSTOM'">
+            预设：{{ providers.find(p => p.code === llmCfg.provider)?.baseUrl }}
           </p>
         </div>
-
         <div class="config-item">
           <label class="lbl">API Key <span class="required">*</span></label>
-          <div class="key-input">
-            <input
-              v-model="config.apiKey"
-              :type="saved ? 'password' : 'text'"
-              placeholder="输入你的 API Key"
-              @input="saved = false"
-            />
-            <button class="toggle-key" @click="saved = !saved" v-if="config.apiKey">
-              {{ saved ? '👁️' : '👁️‍🗨️' }}
-            </button>
-          </div>
-          <p class="hint">Key 仅保存在本地数据库，不会上传到任何第三方</p>
+          <input v-model="llmCfg.apiKey" type="text" placeholder="输入 API Key" @input="llmSaved = false" />
+          <p class="hint">Key 仅保存在本地数据库</p>
         </div>
-
         <div class="config-item">
           <label class="lbl">模型名称</label>
-          <input
-            v-model="config.model"
-            placeholder="如 deepseek-chat"
-            @input="saved = false"
-          />
-          <p class="hint" v-if="config.provider && config.provider !== 'CUSTOM'">
-            预设推荐：{{ providers.find(p => p.code === config.provider)?.defaultModel }}
+          <input v-model="llmCfg.model" placeholder="如 gpt-4o-mini" @input="llmSaved = false" />
+          <p class="hint" v-if="llmCfg.provider && llmCfg.provider !== 'CUSTOM'">
+            推荐：{{ providers.find(p => p.code === llmCfg.provider)?.defaultModel }}
           </p>
         </div>
-
         <div class="config-item">
           <label class="lbl">超时时间（秒）</label>
-          <input
-            v-model.number="config.timeoutSeconds"
-            type="number"
-            min="5"
-            max="120"
-            @input="saved = false"
-          />
+          <input v-model.number="llmCfg.timeoutSeconds" type="number" min="5" max="120" @input="llmSaved = false" />
         </div>
       </section>
 
-      <!-- 保存按钮 -->
       <div class="save-area">
-        <button class="save-btn" @click="save" :disabled="saving">
-          <span v-if="!saving">💾 保存配置</span>
-          <span v-else>⏳ 保存中…</span>
+        <button class="save-btn" @click="saveLlm" :disabled="llmSaving">
+          {{ llmSaving ? '保存中…' : '保存大模型配置' }}
         </button>
-        <div v-if="saved" class="save-success">✅ 配置已保存，立即可用</div>
-        <div v-if="errorMsg" class="save-error">❌ {{ errorMsg }}</div>
+        <div v-if="llmSaved" class="save-success">配置已保存</div>
       </div>
 
-      <!-- 提供商说明 -->
       <section class="info-card">
-        <h2 class="card-title">📖 提供商说明</h2>
+        <h2 class="card-title">提供商说明</h2>
         <div class="info-list">
-          <div class="info-item">
-            <strong>ChatGPT</strong> — 官方 OpenAI 接口，访问 platform.openai.com 获取 Key
-          </div>
-          <div class="info-item">
-            <strong>DeepSeek</strong> — 深度求索，性价比高，访问 platform.deepseek.com
-          </div>
-          <div class="info-item">
-            <strong>豆包</strong> — 字节跳动火山引擎，访问 console.volces.com/ark
-          </div>
-          <div class="info-item">
-            <strong>千问</strong> — 阿里巴巴阿里云，访问 dashscope.console.aliyun.com
-          </div>
-          <div class="info-item">
-            <strong>自定义</strong> — 支持任何 OpenAI 兼容协议的 API 端点
-          </div>
+          <div class="info-item"><strong>ChatGPT</strong> — OpenAI 官方，platform.openai.com</div>
+          <div class="info-item"><strong>DeepSeek</strong> — platform.deepseek.com</div>
+          <div class="info-item"><strong>豆包</strong> — 字节火山引擎 console.volces.com/ark</div>
+          <div class="info-item"><strong>千问</strong> — 阿里云 dashscope.console.aliyun.com</div>
+          <div class="info-item"><strong>自定义</strong> — 任何 OpenAI 兼容端点</div>
         </div>
       </section>
     </template>
+
+    <!-- ============ 天气 Tab ============ -->
+    <template v-if="tab === 'weather' && !loading">
+      <section class="config-card">
+        <h2 class="card-title">和风天气</h2>
+        <div class="config-item">
+          <label class="lbl">API Key <span class="required">*</span></label>
+          <input v-model="weatherCfg.apiKey" placeholder="访问 console.qweather.com 获取 Key" @input="weatherSaved = false" />
+          <p class="hint">免费订阅即可，用于实时天气与体感温度</p>
+        </div>
+        <div class="config-item">
+          <label class="lbl">城市名 <span class="required">*</span></label>
+          <input v-model="weatherCfg.location" placeholder="如 北京、上海、成都、广州" @input="weatherSaved = false" />
+          <p class="hint">支持中文城市名，系统会自动解析为 LocationID。也可直接输入数字 LocationID（如 101010100），默认 <code>北京</code></p>
+        </div>
+        <div class="config-item">
+          <label class="lbl">缓存时长（秒）</label>
+          <input v-model.number="weatherCfg.cacheTtlSeconds" type="number" min="60" max="7200" @input="weatherSaved = false" />
+          <p class="hint">避免频繁调用，默认 600 秒（10 分钟）</p>
+        </div>
+      </section>
+
+      <div class="save-area">
+        <button class="save-btn" @click="saveWeather" :disabled="weatherSaving">
+          {{ weatherSaving ? '保存中…' : '保存天气配置' }}
+        </button>
+        <div v-if="weatherSaved" class="save-success">配置已保存，下次刷新即生效</div>
+      </div>
+
+      <section class="info-card">
+        <h2 class="card-title">使用说明</h2>
+        <div class="info-list">
+          <div class="info-item"><strong>1.</strong> 注册 <code>console.qweather.com</code> 账号</div>
+          <div class="info-item"><strong>2.</strong> 创建项目，复制"API Key"粘贴到上方</div>
+          <div class="info-item"><strong>3.</strong> 用"城市查询"接口找到你所在城市的 Location ID 填入</div>
+          <div class="info-item"><strong>4.</strong> 保存后回到首页，顶部即可看到实时天气与体感温度</div>
+        </div>
+      </section>
+    </template>
+
+    <div v-if="errorMsg" class="save-error" style="text-align:center">{{ errorMsg }}</div>
   </div>
 </template>
 
@@ -216,191 +232,136 @@ onMounted(loadConfig)
   margin: 0 auto;
   height: 100%;
   overflow-y: auto;
-  padding-bottom: 16px;
+  padding: 20px;
+  padding-bottom: 24px;
 }
-
-.page-header {
+.title-row {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 24px;
-  background: linear-gradient(135deg, #4B3FE3 0%, #764ba2 100%);
-  border-radius: 16px;
-  color: white;
-  box-shadow: 0 8px 32px rgba(75, 63, 227, 0.3);
+  padding-bottom: 8px;
 }
-.header-icon { font-size: 36px; }
-.page-header h1 { font-size: 22px; font-weight: 700; }
-.subtitle { font-size: 13px; opacity: 0.85; margin-top: 4px; }
-.status-badge {
-  margin-left: auto;
-  padding: 6px 14px;
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 999px;
-  font-size: 13px;
+.title-text h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
+.title-text .sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+.title-line { flex: 1; height: 1px; background: var(--border); }
+
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  position: relative;
+  padding: 10px 18px;
+  font-size: 14px;
   font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s;
+  margin-right: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
-.status-badge.ready {
-  background: rgba(39, 210, 191, 0.4);
-  animation: pulse 2s infinite;
+.tab .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--success);
 }
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--text);
+  border-bottom: 2px solid var(--text);
+  margin-bottom: -1px;
 }
 
-.loading-state {
-  text-align: center;
-  padding: 60px;
-  color: var(--text-muted);
-  font-size: 16px;
-}
+.loading-state { text-align: center; padding: 60px; color: var(--text-muted); }
 
 .config-card {
-  background: var(--surface);
-  border-radius: 16px;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
   padding: 20px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
 }
-.card-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 16px;
-  color: var(--text);
-}
+.card-title { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
 
-/* 提供商选择 */
 .provider-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 10px;
 }
 .provider-card {
-  position: relative;
-  padding: 16px 14px;
-  border: 2px solid var(--border);
-  border-radius: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-  background: var(--surface);
-}
-.provider-card:hover {
-  border-color: var(--brand);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(75, 63, 227, 0.1);
-}
-.provider-card.active {
-  border-color: var(--brand);
-  background: var(--brand-soft);
-  box-shadow: 0 4px 16px rgba(75, 63, 227, 0.2);
-}
-.provider-name {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text);
-  margin-bottom: 4px;
-}
-.provider-url {
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.provider-url.muted { color: var(--text-muted); font-style: italic; }
-.provider-check {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  width: 20px;
-  height: 20px;
-  background: var(--brand);
-  color: white;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-/* 表单项 */
-.config-item { margin-bottom: 16px; }
-.config-item:last-child { margin-bottom: 0; }
-.lbl {
-  display: block;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-  margin-bottom: 8px;
-}
-.required { color: var(--danger); }
-.key-input { position: relative; display: flex; gap: 8px; }
-.key-input input { flex: 1; }
-.toggle-key {
-  padding: 8px 12px;
-  background: var(--surface-muted);
+  padding: 14px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
-  font-size: 16px;
+  transition: all 0.12s;
 }
-.toggle-key:hover { background: var(--brand-soft); }
-.hint {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 6px;
+.provider-card:hover { border-color: var(--text); }
+.provider-card.active {
+  border-color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--text);
 }
+.provider-name { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.provider-url { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
+.provider-url.muted { font-style: italic; }
 
-/* 保存区域 */
+.config-item { margin-bottom: 16px; }
+.config-item:last-child { margin-bottom: 0; }
+.lbl { display: block; font-size: 13px; font-weight: 500; margin-bottom: 8px; }
+.required { color: var(--danger); }
+.hint { font-size: 12px; color: var(--text-muted); margin-top: 6px; line-height: 1.6; }
+.hint code {
+  background: #F9FAFB;
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.hint a { color: var(--text); border-bottom: 1px solid var(--border); text-decoration: none; }
+
 .save-area {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 8px 0;
+  gap: 8px;
+  padding: 4px 0;
 }
 .save-btn {
-  padding: 12px 40px;
-  background: linear-gradient(135deg, #4B3FE3, #764ba2);
-  color: white;
-  border: none;
-  border-radius: 12px;
-  font-size: 15px;
-  font-weight: 600;
-  box-shadow: 0 4px 16px rgba(75, 63, 227, 0.35);
-  transition: all 0.2s;
-}
-.save-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(75, 63, 227, 0.45);
-}
-.save-success {
-  font-size: 13px;
-  color: var(--success);
+  padding: 10px 36px;
+  background: var(--text);
+  color: #FFFFFF;
+  border: 1px solid var(--text);
+  border-radius: var(--radius);
+  font-size: 14px;
   font-weight: 500;
+  transition: opacity 0.12s;
 }
-.save-error {
-  font-size: 13px;
-  color: var(--danger);
-  font-weight: 500;
-}
+.save-btn:hover:not(:disabled) { opacity: 0.85; }
+.save-success { font-size: 13px; color: var(--success); }
+.save-error { font-size: 13px; color: var(--danger); }
 
-/* 信息卡片 */
 .info-card {
-  background: var(--surface);
-  border-radius: 16px;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
   padding: 20px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
 }
-.info-list { display: flex; flex-direction: column; gap: 10px; }
+.info-list { display: flex; flex-direction: column; gap: 8px; }
 .info-item {
   padding: 10px 12px;
-  background: var(--surface-muted);
-  border-radius: 8px;
+  background: #FAFAFA;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-muted);
 }
-.info-item strong { color: var(--text); }
+.info-item strong { color: var(--text); font-weight: 600; }
+.info-item code {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
 </style>

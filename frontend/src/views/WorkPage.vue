@@ -29,14 +29,21 @@ function onTasksCreated() {
 .work {
   display: grid;
   grid-template-columns: 1fr 340px;
-  gap: 12px;
+  gap: 0;
   height: 100%;
+}
+.work > :first-child {
+  border-right: 1px solid var(--border);
 }
 
 @media (max-width: 960px) {
   .work {
     grid-template-columns: 1fr;
     grid-template-rows: 1fr auto;
+  }
+  .work > :first-child {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
   }
 }
 </style>

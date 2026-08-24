@@ -105,3 +105,8 @@ export const getLlmConfig = () => json(`${BASE}/config/llm`)
 export const saveLlmConfig = (dto) =>
   json(`${BASE}/config/llm`, { method: 'POST', body: JSON.stringify(dto) })
 export const getProviders = () => json(`${BASE}/config/providers`)
+
+// === 天气配置 ===
+export const getWeatherConfig = () => json(`${BASE}/config/weather`)
+export const saveWeatherConfig = (dto) =>
+  json(`${BASE}/config/weather`, { method: 'POST', body: JSON.stringify(dto) })

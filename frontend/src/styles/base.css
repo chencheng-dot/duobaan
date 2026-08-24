@@ -1,30 +1,29 @@
 :root {
-  /* 品牌主色（办公）*/
-  --brand: #4B3FE3;
-  --brand-soft: #F2F7FF;
-  --brand-soft-strong: #E5EAFF;
-  --brand-text: #1A1759;
+  /* 纯白极简配色：统一白色主色，单线条灰边框，仅用一个品牌蓝 */
+  --brand: #111827;      /* 深灰黑，用于品牌色/激活态 */
+  --brand-soft: #F3F4F6; /* 浅灰激活底 */
+  --brand-text: #111827;
   --brand-on: #FFFFFF;
 
-  /* 多巴胺辅色 */
-  --accent: #27D2BF;
-  --accent-soft: #EAFBF8;
-  --accent-text: #0F766E;
+  --accent: #111827;     /* 去掉彩色，同一深灰 */
+  --accent-soft: #F9FAFB;
+  --accent-text: #111827;
 
-  /* 中性 */
+  /* 中性白 */
   --surface: #FFFFFF;
-  --surface-muted: #F7F7F8;
-  --surface-2: #EFEFF2;
-  --text: #171717;
-  --text-muted: #52525B;
-  --border: rgba(23, 23, 23, 0.10);
+  --surface-muted: #FFFFFF;  /* 全白背景 */
+  --surface-2: #F9FAFB;
+  --text: #111827;
+  --text-muted: #6B7280;
+  --border: #E5E7EB;         /* 浅灰单线条 */
+  --border-soft: #F3F4F6;
 
-  --success: #1DC981;
-  --warning: #EFAA17;
-  --danger: #E8463A;
+  --success: #10B981;
+  --warning: #F59E0B;
+  --danger: #EF4444;
 
-  --radius: 8px;
-  --radius-card: 12px;
+  --radius: 6px;
+  --radius-card: 10px;
   --radius-full: 999px;
   --spacer-4: 4px;
   --spacer-8: 8px;
@@ -32,9 +31,10 @@
   --spacer-16: 16px;
   --spacer-20: 20px;
   --spacer-24: 24px;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 
-  font-family: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: "SF Pro Text", "PingFang SC", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -43,23 +43,26 @@ html, body, #app { height: 100%; }
 
 body {
   color: var(--text);
-  background: var(--surface-muted);
+  background: #FFFFFF;
   font-size: 14px;
   line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 button {
   font-family: inherit;
   cursor: pointer;
   border: 1px solid var(--border);
-  background: var(--surface);
+  background: #FFFFFF;
   color: var(--text);
   border-radius: var(--radius);
   padding: 8px 12px;
-  transition: all 0.15s;
+  transition: all 0.12s ease;
+  font-size: 14px;
 }
-button:hover { border-color: var(--brand); }
-button:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+button:hover { border-color: var(--text); }
+button:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 input, textarea, select {
@@ -68,21 +71,27 @@ input, textarea, select {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 8px 12px;
-  background: var(--surface);
+  background: #FFFFFF;
   color: var(--text);
   width: 100%;
+  transition: border-color 0.12s;
 }
 input:focus, textarea:focus, select:focus {
-  outline: 2px solid var(--brand);
-  outline-offset: -1px;
-  border-color: transparent;
+  outline: none;
+  border-color: var(--text);
 }
 
 .card {
-  background: var(--surface);
+  background: #FFFFFF;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  box-shadow: var(--shadow);
 }
 
 .muted { color: var(--text-muted); }
+
+/* 通用分隔线 */
+hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}

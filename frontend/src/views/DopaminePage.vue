@@ -6,15 +6,15 @@ import { usePublicData } from '../composables/usePublicData.js'
 const { weather } = usePublicData()
 
 const mood = ref('')
-const taste = ref('')        // 口味：输入框值
-const tastePreset = ref('')  // 口味：下拉预设值
+const taste = ref('')
+const tastePreset = ref('')
 const diningType = ref('DINE_IN')
 
 const TASTE_PRESETS = ['酸辣', '清淡', '甜口', '咸鲜', '重口', '轻食', '热食', '凉菜', '香辣', '麻辣', '酸甜', '鲜香']
 const DINING_OPTIONS = [
-  { value: 'TAKEOUT', label: '外卖', icon: '🥡' },
-  { value: 'DINE_IN', label: '堂吃', icon: '🍽️' },
-  { value: 'COOK', label: '自己做', icon: '👨‍🍳' }
+  { value: 'TAKEOUT', label: '外卖' },
+  { value: 'DINE_IN', label: '堂吃' },
+  { value: 'COOK', label: '自己做' }
 ]
 
 const loading = ref(false)
@@ -24,9 +24,8 @@ const adopted = ref(false)
 const adoptMsg = ref('')
 const showTasteDropdown = ref(false)
 
-const weatherSummary = computed(() => (weather.value ? weather.value.text + ' ' + weather.value.temp + '℃' : '—'))
+const weatherSummary = computed(() => (weather.value ? weather.value.text + ' ' + weather.value.temp + '°C' : '—'))
 
-// 下拉选项：把预设 + 输入框值（如不在预设里）合并显示
 const tasteOptions = computed(() => {
   const opts = [...TASTE_PRESETS]
   if (taste.value && !TASTE_PRESETS.includes(taste.value)) {
@@ -74,7 +73,6 @@ async function adopt() {
   }
 }
 
-// 点击外部关闭下拉
 function handleTasteBlur() {
   setTimeout(() => { showTasteDropdown.value = false }, 150)
 }
@@ -82,30 +80,31 @@ function handleTasteBlur() {
 
 <template>
   <div class="dopamine">
-    <!-- 情境输入卡片 -->
-    <section class="hero-card">
-      <div class="hero-bg"></div>
-      <div class="hero-content">
-        <h1 class="hero-title">🎯 今天吃什么？</h1>
-        <p class="hero-sub">告诉大模型你的心情和偏好，让 AI 为你推荐一餐</p>
+    <!-- 标题区：纯文字 + 线条分隔 -->
+    <section class="title-row">
+      <div class="title-text">
+        <h1>美食推荐</h1>
+        <p class="sub">告诉大模型你的心情和偏好，获取今日餐食建议</p>
       </div>
+      <div class="title-line"></div>
     </section>
 
+    <!-- 表单卡片 -->
     <section class="form-card">
       <div class="form-row">
         <div class="form-item">
-          <label class="lbl">💭 心情</label>
+          <label class="lbl">心情</label>
           <input v-model="mood" placeholder="如：略累、兴奋、平淡…" />
         </div>
         <div class="form-item">
-          <label class="lbl">🌤️ 天气</label>
+          <label class="lbl">天气</label>
           <div class="weather-display">{{ weatherSummary }}</div>
         </div>
       </div>
 
       <!-- 口味：输入框 + 下拉 -->
       <div class="form-item">
-        <label class="lbl">👅 口味偏好</label>
+        <label class="lbl">口味偏好</label>
         <div class="taste-wrapper">
           <input
             v-model="taste"
@@ -134,9 +133,9 @@ function handleTasteBlur() {
         </div>
       </div>
 
-      <!-- 用餐方式：大卡片选择 -->
+      <!-- 用餐方式：线条卡片选择 -->
       <div class="form-item">
-        <label class="lbl">🍴 用餐方式</label>
+        <label class="lbl">用餐方式</label>
         <div class="dining-cards">
           <div
             v-for="o in DINING_OPTIONS"
@@ -145,23 +144,34 @@ function handleTasteBlur() {
             :class="{ active: diningType === o.value }"
             @click="diningType = o.value"
           >
-            <span class="dining-icon">{{ o.icon }}</span>
+            <!-- SVG 线条图标 -->
+            <svg v-if="o.value === 'TAKEOUT'" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+              <path d="M6 8h12l1.5 11H4.5L6 8z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <path d="M8 8V5a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <svg v-else-if="o.value === 'DINE_IN'" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+              <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M8 12h8M12 8v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <svg v-else viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+              <path d="M5 19h14M7 19V10a5 5 0 0 1 10 0v9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <line x1="9" y1="14" x2="15" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
             <span class="dining-label">{{ o.label }}</span>
           </div>
         </div>
       </div>
 
       <button class="rec-btn" @click="recommend" :disabled="loading">
-        <span v-if="!loading">✨ 让大模型推荐这一餐</span>
-        <span v-else>🎲 大模型计算中…</span>
+        <span v-if="!loading">获取推荐</span>
+        <span v-else>计算中…</span>
       </button>
     </section>
 
-    <!-- 推荐结果卡片 -->
+    <!-- 推荐结果 -->
     <section class="result-card" v-if="reply">
       <div class="result-header">
-        <span class="result-icon">🍜</span>
-        <h2>今日推荐</h2>
+        <h2>推荐结果</h2>
       </div>
       <div class="reply-content" :class="{ degraded }">{{ reply }}</div>
       <button
@@ -170,16 +180,19 @@ function handleTasteBlur() {
         @click="adopt"
         :disabled="adopted"
       >
-        {{ adopted ? '✅ 已采纳' : '📝 采纳并写入流程表' }}
+        {{ adopted ? '已采纳' : '采纳并写入流程表' }}
       </button>
       <div v-if="adoptMsg" class="adopt-msg">{{ adoptMsg }}</div>
     </section>
 
     <!-- 空状态 -->
     <section class="empty-card" v-else>
-      <div class="empty-ill">🍽️</div>
-      <p class="empty-title">填好心情和口味</p>
-      <p class="empty-desc">点上方按钮，让 AI 为你推荐一餐</p>
+      <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true">
+        <circle cx="24" cy="24" r="18" fill="none" stroke="#E5E7EB" stroke-width="1.2"/>
+        <path d="M18 22l6 6 6-6" fill="none" stroke="#D1D5DB" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <p class="empty-title">等待你的选择</p>
+      <p class="empty-desc">填写表单后点击「获取推荐」</p>
     </section>
   </div>
 </template>
@@ -193,38 +206,25 @@ function handleTasteBlur() {
   margin: 0 auto;
   height: 100%;
   overflow-y: auto;
-  padding-bottom: 16px;
-}
-
-/* Hero 卡片 - 腾讯视频风格 */
-.hero-card {
-  position: relative;
-  border-radius: 16px;
-  overflow: hidden;
-  padding: 32px 24px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
-  color: white;
-  box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);
-}
-.hero-bg {
-  position: absolute;
-  top: -50%;
-  right: -20%;
-  width: 300px;
-  height: 300px;
-  background: radial-gradient(circle, rgba(255,255,255,0.3) 0%, transparent 70%);
-  border-radius: 50%;
-}
-.hero-content { position: relative; z-index: 1; }
-.hero-title { font-size: 24px; font-weight: 700; margin-bottom: 6px; }
-.hero-sub { font-size: 13px; opacity: 0.9; }
-
-/* 表单卡片 */
-.form-card {
-  background: var(--surface);
-  border-radius: 16px;
   padding: 20px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  padding-bottom: 24px;
+}
+
+.title-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  padding-bottom: 12px;
+}
+.title-text h1 { font-size: 20px; font-weight: 600; color: var(--text); letter-spacing: 0.5px; }
+.title-text .sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+.title-line { flex: 1; height: 1px; background: var(--border); margin-bottom: 10px; }
+
+.form-card {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 20px;
 }
 .form-row {
   display: grid;
@@ -233,6 +233,7 @@ function handleTasteBlur() {
   margin-bottom: 14px;
 }
 .form-item { margin-bottom: 14px; position: relative; }
+.form-item:last-child { margin-bottom: 0; }
 .lbl {
   display: block;
   font-size: 13px;
@@ -241,15 +242,15 @@ function handleTasteBlur() {
   margin-bottom: 8px;
 }
 .weather-display {
-  padding: 10px 14px;
-  background: linear-gradient(135deg, #e0f2fe, #f0f9ff);
-  border-radius: 10px;
-  border: 1px solid #bae6fd;
-  font-weight: 500;
-  color: #0369a1;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  background: #FFFFFF;
+  color: var(--text-muted);
 }
 
-/* 口味输入 + 下拉 */
+/* 口味 */
 .taste-wrapper { position: relative; }
 .taste-dropdown {
   position: absolute;
@@ -257,38 +258,38 @@ function handleTasteBlur() {
   left: 0;
   right: 0;
   margin-top: 4px;
-  background: white;
+  background: #FFFFFF;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  border-radius: var(--radius);
   max-height: 200px;
   overflow-y: auto;
   z-index: 10;
 }
 .taste-option {
-  padding: 10px 14px;
+  padding: 8px 14px;
   cursor: pointer;
   font-size: 14px;
-  border-bottom: 1px solid #f3f4f6;
-  transition: background 0.15s;
+  border-bottom: 1px solid var(--border-soft);
+  transition: background 0.12s;
 }
 .taste-option:last-child { border-bottom: none; }
-.taste-option:hover { background: var(--accent-soft); }
-.taste-option.active { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+.taste-option:hover { background: #F9FAFB; }
+.taste-option.active { background: #F3F4F6; font-weight: 600; color: var(--text); }
 .taste-hints { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .hint-tag {
   padding: 4px 12px;
   font-size: 12px;
-  background: var(--surface-muted);
-  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #FFFFFF;
+  border-radius: var(--radius-full);
   cursor: pointer;
-  transition: all 0.15s;
   color: var(--text-muted);
+  transition: all 0.12s;
 }
-.hint-tag:hover { background: var(--accent-soft); color: var(--accent-text); }
-.hint-tag.on { background: var(--accent); color: white; }
+.hint-tag:hover { border-color: var(--text); color: var(--text); }
+.hint-tag.on { background: var(--text); color: #FFFFFF; border-color: var(--text); }
 
-/* 用餐方式卡片选择 */
+/* 用餐方式 */
 .dining-cards {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -298,85 +299,79 @@ function handleTasteBlur() {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 16px 12px;
-  border: 2px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
+  gap: 8px;
+  padding: 18px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #FFFFFF;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.12s;
+  color: var(--text-muted);
 }
-.dining-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.dining-card:hover { border-color: var(--text); color: var(--text); }
 .dining-card.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  box-shadow: 0 4px 12px rgba(39, 210, 191, 0.25);
+  border-color: var(--text);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--text);
 }
-.dining-icon { font-size: 28px; }
 .dining-label { font-size: 13px; font-weight: 500; }
 
-/* 推荐按钮 */
 .rec-btn {
   width: 100%;
-  padding: 14px;
+  padding: 12px;
   margin-top: 4px;
-  background: linear-gradient(135deg, #27d2bf, #14b8a6);
-  color: white;
-  border: none;
-  border-radius: 12px;
-  font-size: 15px;
-  font-weight: 600;
-  box-shadow: 0 4px 16px rgba(39, 210, 191, 0.35);
-  transition: all 0.2s;
+  background: var(--text);
+  color: #FFFFFF;
+  border: 1px solid var(--text);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 500;
+  transition: opacity 0.12s;
 }
-.rec-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(39, 210, 191, 0.45); }
+.rec-btn:hover:not(:disabled) { opacity: 0.85; }
 
-/* 结果卡片 */
 .result-card {
-  background: var(--surface);
-  border-radius: 16px;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
   padding: 20px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
-  border-left: 4px solid var(--accent);
 }
-.result-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.result-header h2 { font-size: 16px; font-weight: 600; }
-.result-icon { font-size: 20px; }
+.result-header h2 { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 12px; }
 .reply-content {
   padding: 14px;
-  background: linear-gradient(135deg, var(--accent-soft), #f0fdfa);
-  border-radius: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   white-space: pre-wrap;
   line-height: 1.8;
   font-size: 14px;
+  color: var(--text);
+  background: #FFFFFF;
 }
 .reply-content.degraded {
-  background: var(--surface-muted);
+  background: #FAFAFA;
   color: var(--text-muted);
 }
 .adopt-btn {
   margin-top: 14px;
   width: 100%;
-  padding: 12px;
-  background: var(--brand);
-  color: white;
-  border: none;
-  border-radius: 10px;
-  font-weight: 600;
-  transition: all 0.2s;
+  padding: 10px;
+  background: #FFFFFF;
+  color: var(--text);
+  border: 1px solid var(--text);
+  border-radius: var(--radius);
+  font-weight: 500;
+  transition: all 0.12s;
 }
-.adopt-btn:hover:not(:disabled) { opacity: 0.9; }
+.adopt-btn:hover:not(:disabled) { background: var(--text); color: #FFFFFF; }
 .adopt-msg { margin-top: 10px; font-size: 13px; color: var(--success); }
 
-/* 空状态 */
 .empty-card {
   text-align: center;
-  padding: 40px 20px;
-  background: var(--surface);
-  border-radius: 16px;
+  padding: 48px 20px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-card);
 }
-.empty-ill { font-size: 48px; margin-bottom: 12px; }
-.empty-title { font-size: 16px; font-weight: 600; color: var(--text); }
+.empty-title { font-size: 15px; font-weight: 500; color: var(--text); margin-top: 12px; }
 .empty-desc { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
 
 @media (max-width: 600px) {

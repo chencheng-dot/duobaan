@@ -114,28 +114,37 @@ spring.datasource.password=你的密码
 
 #### 3.1 和风天气（天气功能）
 
-1. 前往 [https://dev.qweather.com](https://dev.qweather.com) 注册并获取 API Key
-2. 修改 `application.properties`：
+1. 前往 [https://console.qweather.com](https://console.qweather.com) 注册并获取 API Key
+2. 在系统「设置 → 天气服务」页面填入 Key 和中文城市名（如"北京""上海"）即可
 
-```properties
-duobaan.weather.api-key=你的和风天气Key
-duobaan.weather.location=101010100   # 默认北京朝阳区，改为你的城市 ID
-```
-
-> 不配置也能启动，天气接口返回占位数据。
+> 也支持通过 `application.properties` 配置：
+> ```properties
+> duobaan.weather.api-key=你的和风天气Key
+> duobaan.weather.location=北京     # 支持中文城市名或数字LocationID，默认北京
+> ```
+>
+> 不配置也能启动，天气接口返回占位数据。保存后顶部立即显示 7 种天气 SVG 线条图标（晴/多云/阴/雨/雪/雷/雾）+ 温度 + 体感温度。
 
 #### 3.2 大模型（对话、拆单、推荐功能）
 
-修改 `application.properties`：
+> 推荐直接在「设置 → 大模型」页面选择厂商并填 Key，三步完成：选厂商 → 贴 Key → 保存。
 
-```properties
-duobaan.llm.base-url=https://api.deepseek.com/v1   # 改为你用的厂商
-duobaan.llm.api-key=你的APIKey
-duobaan.llm.model=deepseek-chat                    # 改为你用的模型名
-```
+支持的预设与官方地址：
 
-> 支持任何 OpenAI 兼容协议的厂商（DeepSeek、阿里云百炼、火山引擎等）。
-> 不配置也能启动，对话接口返回降级提示。
+| 提供商 | 官方地址 | 推荐模型 |
+|---|---|---|
+| ChatGPT（OpenAI 官方） | platform.openai.com | gpt-4o-mini |
+| DeepSeek | platform.deepseek.com | deepseek-chat |
+| 豆包（火山引擎） | console.volces.com/ark | doubao-seed-1-6-flash |
+| 千问（阿里云） | dashscope.console.aliyun.com | qwen-plus |
+| 自定义 | 任何 OpenAI 兼容端点 | 自填 |
+
+> 也支持通过 `application.properties` 配置：
+> ```properties
+> duobaan.llm.base-url=https://api.deepseek.com/v1
+> duobaan.llm.api-key=你的APIKey
+> duobaan.llm.model=deepseek-chat
+> ```
 
 ### 4. 启动后端
 
@@ -252,10 +261,9 @@ MIT
 本次更新集中在 UI 美化、可视化增强与大模型接入体验优化：
 
 **1. 新增大模型配置页面（设置页）**
-- 侧边栏新增 ⚙️「设置」入口
+- 侧边栏新增「设置」入口
 - 支持 4 个预设厂商 + 自定义：ChatGPT / DeepSeek / 豆包 / 千问 / 自定义
 - 点击厂商卡片自动填充 baseUrl 和默认模型
-- API Key 可显示/隐藏，实时回显当前配置状态
 - 保存后立即可用，无需重启服务
 - 新增 `/api/config/llm`、`/api/config/providers` 接口
 - 新增 `system_config` 数据库表，运行时配置持久化
@@ -267,20 +275,52 @@ MIT
 - LlmGateway 统一从数据库读取运行时配置，优先于默认值
 
 **3. UI 页面重构（腾讯视频风格）**
-- DopaminePage 整体视觉升级：渐变 Hero 卡片、精致卡片式布局
-- 用餐方式改为大图标卡片选择（外卖🥡/堂吃🍽️/自做👨‍🍳）
+- DopaminePage 整体视觉升级：Hero 卡片、精致卡片式布局
+- 用餐方式改为大图标卡片选择（外卖/堂吃/自做）
 - 推荐按钮、结果卡片统一圆角 + 投影风格
-- 空状态插画 + 说明文案引导
 
 **4. 口味输入改为 输入框 + 下拉选项**
 - 支持自由输入任意口味词，也可从下拉列表快速选择
 - 底部 6 个常用口味快捷标签，一键选择
-- 输入的自定义口味会自动出现在下拉列表顶部
-- 预设 12 种口味：酸辣/清淡/甜口/咸鲜/重口/轻食/热食/凉菜/香辣/麻辣/酸甜/鲜香
+- 预设 12 种口味：酸辣/清淡/甜口/咸鲜/重口/轻食…
 
 **5. 可视化页面增强**
-- 设置页：配置状态徽章（✓已配置 / ○未配置），带呼吸动画
+- 设置页：配置状态徽章（已配置/未配置）
 - 提供商说明卡片，快速定位各平台注册地址
-- Hero 卡片采用渐变 + 光斑效果，营造腾讯视频观感
+
+---
+
+### v2.1.0 🌤️（本次更新）
+
+**1. 大模型提示更友好**
+- 未配置大模型/Key 无效时，不再抛出技术错误（如「流式调用失败 HTTP 401」），
+  改为直白提示：「⚠️ 未配置大模型，请先到「设置」页面选择厂商并填写 API Key，即可使用办公助手/美食推荐功能」
+- 修正设置页历史残留错字「柴GPT」和注册地址错误，统一为 ChatGPT + 正确官方网址
+
+**2. 天气服务升级：支持中文城市名，无需查 Location ID**
+- 后端新增「和风天气 GeoAPI 城市解析」，中文城市名（北京/上海/成都…）→ 自动解析为 LocationID
+- 设置页「城市 Location ID」字段改为「城市名」，默认「北京」
+- 新增 24h 城市解析缓存 + 10min 天气数据缓存，避免频繁调用
+- 兼容数字 LocationID（老用户无感）
+- 设置页新增天气 Tab：Key + 城市名 + 缓存时长 + 4 步使用说明
+- 后端新增 `WeatherConfigDTO`、`/api/config/weather` GET/POST、`ConfigService` 持久化方法
+- 配置优先级：数据库运行时配置 > application.properties
+
+**3. 天气可视化：7 种 SVG 线条图标**
+- 顶部 TopBar 不再使用 emoji，根据实时天气文字渲染轮廓风 SVG：
+  ☀晴 / ⛅多云 / ☁阴 / 🌧雨 / ❄雪 / ⚡雷暴 / 🌫雾霾
+- 同时展示温度和体感温度；未配置 Key 时显示「—」占位图标
+
+**4. UI 风格统一：主配色白色 + 透明轮廓风**
+- 所有页面统一为纯白色背景 + 浅灰边线 + 深灰文字（`--brand / --border / --text / --text-muted`）
+- 渐变、彩色块、emoji、花哨阴影全部移除
+- Logo、侧边栏、导航、设置、天气图标一律改为无填充 SVG 线条轮廓
+- TopBar 重构为 Logo + 导航 + 天气 + 时间 + 设置按钮的极简行
+- WorkPage 改为两栏分隔线布局，去除卡片间距的花哨留白
+- DopaminePage / ChatPanel / FlowTable 统一白底细边框
+
+**5. 其它修复**
+- 修正设置页中「dev.qweather.com/docs/api/geo/city-lookup/」404 链接，改为直接使用中文城市名 + 前端可视化输入
+- 前端构建产物 123.95 kB（gzip 46.44 kB），后端 44 源文件全部编译通过
 
 ---

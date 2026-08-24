@@ -96,7 +96,7 @@ public class LlmGatewayService {
     public void chatStream(String userMessage, ChatMode mode, String systemContext, Consumer<String> onDelta) {
         LlmConfigDTO cfg = currentConfig();
         if (!isConfigured(cfg)) {
-            onDelta.accept(degradedHint(userMessage, mode));
+            onDelta.accept(degradedHint(mode));
             return;
         }
         try {
@@ -120,7 +120,7 @@ public class LlmGatewayService {
             HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
             int status = resp.statusCode();
             if (status >= 400) {
-                onDelta.accept("[流式调用失败 HTTP " + status + "]");
+                onDelta.accept(friendlyHttpError(status));
                 return;
             }
             try (BufferedReader reader = new BufferedReader(
@@ -151,7 +151,7 @@ public class LlmGatewayService {
                 }
             }
         } catch (Exception e) {
-            onDelta.accept("\n[流式中断: " + e.getMessage() + "]");
+            onDelta.accept("\n" + friendlyStreamError(e.getMessage()));
         }
     }
 
@@ -268,16 +268,38 @@ public class LlmGatewayService {
     }
 
     private ChatResponse degradedReply(String userMessage, ChatMode mode) {
-        return new ChatResponse(degradedHint(userMessage, mode), true);
+        return new ChatResponse(degradedHint(mode), true);
     }
 
-    private String degradedHint(String userMessage, ChatMode mode) {
-        String hint = switch (mode) {
-            case WORK -> "（未配置大模型 Key，办公助手暂不可用。配置 duobaan.llm.api-key 后即可生效。）"
-                    + "\n你说的：" + userMessage;
-            case DOPAMINE -> "（未配置大模型 Key，餐食推荐暂不可用。配置 duobaan.llm.api-key 后即可生效。）"
-                    + "\n你说的：" + userMessage;
+    /** 未配置大模型的直白提示 */
+    private String degradedHint(ChatMode mode) {
+        String scene = (mode == ChatMode.WORK) ? "办公助手" : "美食推荐";
+        return "⚠️ 未配置大模型，请先到「设置」页面选择厂商并填写 API Key，即可使用" + scene + "功能。";
+    }
+
+    /** 把 HTTP 状态码翻译成人话错误 */
+    private String friendlyHttpError(int status) {
+        return switch (status) {
+            case 401 -> "❌ API Key 无效或已过期，请检查 Key 是否填写正确。";
+            case 403 -> "❌ API Key 无权访问该接口，请确认账号权限或套餐余量。";
+            case 404 -> "❌ 接口地址错误（HTTP 404），请检查 Base URL 是否正确。";
+            case 429 -> "❌ 请求过于频繁（HTTP 429），请稍后再试或升级套餐。";
+            case 500, 502, 503 -> "❌ 大模型服务端异常（HTTP " + status + "），请稍后重试。";
+            default -> "❌ 大模型调用失败（HTTP " + status + "），请检查配置。";
         };
-        return hint;
+    }
+
+    /** 流式中断直白提示 */
+    private String friendlyStreamError(String rawMsg) {
+        if (rawMsg == null) return "❌ 流式连接中断，请重试。";
+        if (rawMsg.contains("timed out") || rawMsg.contains("timeout")) {
+            return "❌ 请求超时，请检查网络或增大超时时间。";
+        }
+        if (rawMsg.contains("Connection refused") || rawMsg.contains("No route")) {
+            return "❌ 无法连接到接口地址，请检查 Base URL 和网络。";
+        }
+        if (rawMsg.contains("401")) return "❌ API Key 无效，请检查 Key 是否填写正确。";
+        if (rawMsg.contains("404")) return "❌ 接口地址错误，请检查 Base URL。";
+        return "❌ 流式连接中断：" + rawMsg;
     }
 }
