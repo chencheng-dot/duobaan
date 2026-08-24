@@ -27,11 +27,11 @@ public class ChatMessage {
     @Column(nullable = false, length = 20)
     private ChatMode mode;
 
-    @Column(nullable = false, length = 20)
+    @Column(name = "chat_role", nullable = false, length = 20)
     private String role; // user / assistant
 
     @Lob
-    @Column(nullable = false)
+    @Column(nullable = false, columnDefinition = "MEDIUMTEXT")
     private String content;
 
     @Column(nullable = false)

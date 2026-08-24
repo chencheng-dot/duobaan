@@ -1,6 +1,16 @@
 <script setup>
+import { ref } from 'vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import FlowTable from '../components/FlowTable.vue'
+
+// 流程表实例引用：用于 ChatPanel 写入任务后联动刷新
+const flowRef = ref(null)
+
+function onTasksCreated() {
+  if (flowRef.value && flowRef.value.load) {
+    flowRef.value.load()
+  }
+}
 </script>
 
 <template>
@@ -9,8 +19,9 @@ import FlowTable from '../components/FlowTable.vue'
       mode="WORK"
       title="办公对话"
       placeholder="规划今天/明天的安排，或让大模型帮你起草…"
+      @tasks-created="onTasksCreated"
     />
-    <FlowTable />
+    <FlowTable ref="flowRef" />
   </div>
 </template>
 

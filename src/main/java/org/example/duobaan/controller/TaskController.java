@@ -4,6 +4,7 @@ import java.util.List;
 
 import org.example.duobaan.model.Task;
 import org.example.duobaan.model.TaskGroup;
+import org.example.duobaan.model.dto.BulkTaskRequest;
 import org.example.duobaan.model.dto.TaskPatch;
 import org.example.duobaan.model.dto.TaskRequest;
 import org.example.duobaan.model.dto.TaskSummary;
@@ -39,6 +40,12 @@ public class TaskController {
     @PostMapping
     public Task create(@RequestBody TaskRequest req) {
         return taskService.create(req);
+    }
+
+    /** 批量建任务：大模型拆单结果一键写入流程表 */
+    @PostMapping("/bulk")
+    public List<Task> bulkCreate(@RequestBody BulkTaskRequest req) {
+        return taskService.bulkCreate(req.tasks());
     }
 
     @GetMapping("/{id}")

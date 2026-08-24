@@ -63,6 +63,9 @@ function statusText(s) {
   return { TODO: '待办', DOING: '进行中', DONE: '完成', SUBMITTED: '已上交' }[s] || s
 }
 
+// 暴露给父组件：批量写入任务后可立即刷新流程表
+defineExpose({ load })
+
 onMounted(load)
 </script>
 
