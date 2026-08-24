@@ -42,10 +42,17 @@ public class ConfigController {
         this.props = props;
     }
 
-    // =============== 旧 /providers 接口保留 ===============
+    // =============== 厂商预设接口 ===============
+    /** 保留旧版：仅返回 LLM 文本模型厂商列表，兼容 v3.0 之前前端 */
     @GetMapping("/providers")
     public List<ConfigService.ProviderPreset> getProviders() {
         return configService.getProviderPresets();
+    }
+
+    /** 多模态：一次返回 5 种类型（LLM/IMAGE/AUDIO/VIDEO/WEATHER）各自的厂商预设，前端按 Tab 分组渲染 */
+    @GetMapping("/providers/all")
+    public Map<ApiProfileType, List<ConfigService.ProviderPreset>> getProvidersAll() {
+        return configService.getProviderPresetsByType();
     }
 
     // ==================================================================

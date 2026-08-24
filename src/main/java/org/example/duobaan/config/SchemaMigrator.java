@@ -37,6 +37,7 @@ public class SchemaMigrator {
             }
             migrateTaskTable(dbName);
             migrateChatMessageTable(dbName);
+            migrateApiProfileTable(dbName);
         } catch (Exception e) {
             // 升级失败不阻止启动（全新数据库列已在 schema.sql 建好，这里只是兼容旧库）
             log.warn("[SchemaMigrator] 迁移过程发生异常，跳过（全新库可忽略）：{}", e.getMessage());
@@ -86,6 +87,30 @@ public class SchemaMigrator {
             jdbc.execute("ALTER TABLE `chat_message` "
                     + "ADD KEY `idx_chat_mode_created` (`mode`, `created_at` DESC, `id` DESC)");
             log.info("[SchemaMigrator] chat_message.idx_chat_mode_created 索引已添加");
+        }
+    }
+
+    /**
+     * api_profile 表：从旧版 ENUM('LLM','WEATHER') → VARCHAR(20)。
+     * 判断依据：COLUMN_TYPE 里以 'enum(' 开头即视为旧版，需要 MODIFY。
+     * 升级后再扩展 IMAGE/AUDIO/VIDEO 等新类型无需再改 DDL。
+     */
+    private void migrateApiProfileTable(String dbName) {
+        String colType = null;
+        try {
+            colType = jdbc.queryForObject(
+                    "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+                            + "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'api_profile' "
+                            + "AND COLUMN_NAME = 'profile_type'",
+                    String.class, dbName);
+        } catch (Exception ignore) {
+            return; // 表不存在（全新库会由 schema.sql 直接建 VARCHAR）
+        }
+        if (colType != null && colType.toLowerCase().startsWith("enum(")) {
+            jdbc.execute("ALTER TABLE `api_profile` "
+                    + "MODIFY COLUMN `profile_type` VARCHAR(20) NOT NULL "
+                    + "COMMENT 'LLM=文本对话 IMAGE=文生图 AUDIO=TTS+ASR VIDEO=文生视频 WEATHER=天气'");
+            log.info("[SchemaMigrator] api_profile.profile_type 已从 ENUM 升级为 VARCHAR(20)，支持多模态类型扩展");
         }
     }
 

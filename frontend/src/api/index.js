@@ -128,6 +128,31 @@ export const activateApiProfile = (id) =>
   json(`${BASE}/config/profiles/${id}/activate`, { method: 'POST', body: '{}' })
 export const deleteApiProfile = (id) =>
   json(`${BASE}/config/profiles/${id}`, { method: 'DELETE' })
+/** 多模态统一拉取 5 类（LLM/IMAGE/AUDIO/VIDEO/WEATHER）厂商预设，前端设置页按 Tab 渲染 */
+export const getAllProviders = () => json(`${BASE}/config/providers/all`)
+
+// === 多模态生成接口：/api/media/* ===
+/** 文生图：{prompt, size, n, style, quality, mode} */
+export const generateImage = (body) =>
+  json(`${BASE}/media/image`, { method: 'POST', body: JSON.stringify(body) })
+/** 文生语音（TTS）：返回 {audioBytes:base64, audioMime, audioFilename} */
+export const generateSpeech = (body) =>
+  json(`${BASE}/media/speech`, { method: 'POST', body: JSON.stringify(body) })
+/** 语音转写（ASR）：上传文件 + 可选 mode，返回 {text} */
+export const transcribeAudio = async (file, mode = 'WORK') => {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('mode', mode)
+  const res = await fetch(`${BASE}/media/transcribe`, { method: 'POST', body: fd })
+  if (!res.ok) {
+    const txt = await res.text().catch(() => res.statusText)
+    throw new Error(`${res.status} ${txt}`)
+  }
+  return res.json()
+}
+/** 文生视频：{prompt, seconds, ratio, mode} */
+export const generateVideo = (body) =>
+  json(`${BASE}/media/video`, { method: 'POST', body: JSON.stringify(body) })
 
 // === 我的：任务历史 ===
 export const getMineHistory = () => json(`${BASE}/tasks/mine`)

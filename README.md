@@ -20,7 +20,8 @@
 | 流程表 | 今日/明日分组，状态流转（待办/进行中/完成/已上交） |
 | 美食推荐 | 结合天气、心情、口味、用餐方式，大模型推荐 |
 | 双页模式 | 办公模式 / 多巴胺模式 / 我的，左侧一键切换 |
-| 多套 API 配置 | 大模型 & 天气支持保存多套 Key，切换即用，删除即物理删除防泄露 |
+| 多套 API 配置 | 文本 / 图片 / 语音 / 视频 / 天气 五套独立配置，保存多套 Key，切换即用，删除即物理删除防泄露 |
+| 多模态生成 | 聊天顶栏一键切 Tab：智能 / 文本 / 图片 / 转写(ASR) / 朗读(TTS) / 视频，对应模型调用对应接口 |
 | 任务留痕（我的） | 已上交 / 已完成 / 已删除任务历史三栏展示，软删除不丢数据 |
 
 ## 技术栈
@@ -538,5 +539,69 @@ MIT
 | 再 GET history（DOPAMINE） | ✅ 0 条（两 mode 严格隔离） |
 | DOPAMINE 发「推荐午餐」→ 再 GET history | ✅ 2 条，WORK 侧仍保持自己的 2 条 |
 | 刷新浏览器 → ChatPanel onMounted 触发 | ✅ 对应 mode 的 2 条消息自动渲染并滚动到底部，**完全恢复上次对话** ✨ |
+
+---
+
+### v3.2.0 🎨🎬🔊（本次更新：多模态生成 — 文本 / 图片 / 语音 / 视频，按需调用对应模型）
+
+**需求背景**：单个大语言模型只能聊天，没法画图、生成视频、转写录音、朗读文字。用户的原话是「每当我提出要求的时候，可以有对应的模型来完成我的要求」。
+
+**解决思路**：把「大模型」拆成 5 类独立能力，每类独立走自己的 ApiProfile.active，聊天顶栏用 6 Tab 胶囊直接路由到对应接口，用户一眼知道"现在在调用什么模型"。
+
+**1. 后端：能力分层 + 统一响应 DTO**
+
+- 新增枚举 [ApiProfileType.java](src/main/java/org/example/duobaan/model/ApiProfileType.java)：`LLM | IMAGE | AUDIO | VIDEO | WEATHER`，不再把所有东西都塞成"LLM配置"。
+- `api_profile.profile_type` 从 ENUM 幂等迁移成 VARCHAR(20)：`SchemaMigrator.migrateApiProfileTable` 判断信息模式，老数据按旧 ENUM 值 UPDATE。
+- 新增 [MediaResponse.java](src/main/java/org/example/duobaan/model/dto/MediaResponse.java)：`kind/status/error/text/audioBytes/audioMime/items[]`，所有多模态接口共用同一结构。
+- 新增 [MediaService.java](src/main/java/org/example/duobaan/service/MediaService.java)：4 类能力全覆盖，**都走 OpenAI 兼容协议**，换厂商只换 baseUrl + model：
+  - 文生图：`POST {baseUrl}/images/generations`，超时 60s，优先取 `data[].url`，回退到 `data[].b64_json`
+  - TTS 文生语音：`POST {baseUrl}/audio/speech`，直接读响应二进制（不是 JSON），返回 `audioBytes/audioMime/speech.mp3`
+  - ASR 语音转写：`POST {baseUrl}/audio/transcriptions`，`MultipartFile` 上传，取 `{text}` 字段
+  - 文生视频：`POST {baseUrl}/videos/generations`，超时 180s，识别 `succeeded / pending / failed` 三态
+- **未配置降级**：每类 ApiProfile 无 active 时返回 `status=degraded + 中文用户友好错误`（如「⚠️ 未配置「图片模型」，请先到「设置 → 图片模型」选厂商填 Key 并点击「使用」」），HTTP 200 而非 500，前端直接渲染气泡不报错。
+- 新增 [MediaController.java](src/main/java/org/example/duobaan/controller/MediaController.java)：4 个接口 `POST /api/media/{image,speech,transcribe,video}`，每次成功都把「富内容 JSON」以 `%%RICH_MEDIA%%{"kind","payload","text"}` 前缀写入 `chat_message`，和 v3.1「对话历史自动恢复」兼容。
+
+**2. 设置页：5 Tab 独立管理（文本 / 图片 / 语音 / 视频 / 天气）**
+
+- 后端 `ConfigService.getProviderPresetsByType` 新增 13 条预设：
+  - IMAGE：DALL·E 3 / Seedream(火山) / 万相(通义) / CUSTOM
+  - AUDIO：OpenAI(TTS+Whisper) / 火山(TTS/ASR) / MiniMax / CUSTOM
+  - VIDEO：Seedance(火山) / 可灵Kling(快手) / 万相视频(通义) / CUSTOM
+  - WEATHER：和风 / CUSTOM
+- 新接口 `GET /api/config/providers/all`：一次性返回 5 类预设，前端 SettingsPage 5 Tab 复用同一套「新增/编辑/删除/设为使用」UI。
+- 每个 Tab 右上角绿色小圆点独立显示"已激活"，不再混淆 LLM 和 IMAGE 是否配置。
+
+**3. 聊天面板：6 模态胶囊选择器 + 富气泡渲染**
+
+- [ChatPanel.vue](frontend/src/components/ChatPanel.vue) 顶栏新增 6 颗胶囊：`智能(AUTO) / 文本(TEXT) / 图片(IMAGE) / 转写(ASR) / 朗读(TTS) / 视频(VIDEO)`。
+  - **智能 / 文本**：走原来的 `chatStream` SSE 流式（`AUTO` 和 `TEXT` 行为等价，`AUTO` 是给"不知道选啥"的用户默认项）
+  - **图片**：输入描述 → 调用 `generateImage` → 气泡内渲染 `img` 网格，点击图片新标签页打开原图
+  - **转写**：输入框替换为虚线文件框 → 选 mp3/wav/m4a/flac → 调 `transcribeAudio` → 文本直接展示在气泡内并自动入库当 LLM 上下文
+  - **朗读**：输入文字 → 调 `generateSpeech` → 前端把 `audioBytes` base64 → Blob URL → `<audio controls>` 直接播放
+  - **视频**：输入描述 → 生成较久（spinner 动画提示 1~3 分钟）→ 返回 `succeeded` 时渲染 `<video controls>`，`pending` 时提示"排队中稍后重试"
+- 富内容恢复：挂载时解析 `%%RICH_MEDIA%%` 前缀 JSON，自动重建 `img / audio / video` 标签，刷新不丢失多模态结果。
+- 「拆单」按钮仅在智能 / 文本 Tab 显示，避免 IMAGE/VIDEO Tab 里出现语义混乱。
+- 发送按钮文案根据当前模态动态切换（"生成图片 / 开始朗读 / 生成视频 / 开始转写"），降低认知门槛。
+
+**4. 接口表同步更新**
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `/api/config/providers/all` | GET | 拉取 5 类厂商预设（LLM/IMAGE/AUDIO/VIDEO/WEATHER） |
+| `/api/media/image` | POST | 文生图，返回 items[].url / b64Data |
+| `/api/media/speech` | POST | 文生语音，返回 base64 audioBytes + audioMime |
+| `/api/media/transcribe` | POST (multipart) | 上传音频 → 返回转写 text |
+| `/api/media/video` | POST | 文生视频，status 三态 succeeded / pending / failed |
+
+**5. 端到端实测（未配置 API Key 场景下的降级回归）**
+
+| 场景 | 结果 |
+|---|---|
+| POST `/api/media/image`（未配置 IMAGE） | ✅ HTTP 200 / `status=degraded` / 中文提示"去设置→图片模型填 Key" |
+| POST `/api/media/speech`（未配置 AUDIO） | ✅ HTTP 200 / `status=degraded` / 中文提示"去设置→语音模型填 Key" |
+| POST `/api/media/video`（未配置 VIDEO） | ✅ HTTP 200 / `status=degraded` / 中文提示"去设置→视频模型填 Key" |
+| GET `/api/config/providers/all` | ✅ 返回 LLM(5条) + IMAGE(4条) + AUDIO(4条) + VIDEO(4条) + WEATHER(2条) |
+| 前端切图片 Tab → 输入 → 发送 | ✅ 调 /image，未配置直接渲染降级气泡，不抛异常 |
+| 刷新浏览器 → 富内容图片气泡 | ✅ 从 `%%RICH_MEDIA%%` JSON 自动还原 `<img>` |
 
 ---

@@ -175,7 +175,8 @@ public class ApiProfileService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请求体不能为空");
         }
         if (creating && in.profileType() == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "profileType 不能为空（LLM 或 WEATHER）");
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "profileType 不能为空（LLM=文本 IMAGE=图 AUDIO=语音 VIDEO=视频 WEATHER=天气）");
         }
         if (in.name() == null || in.name().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请填写「配置名称」");
