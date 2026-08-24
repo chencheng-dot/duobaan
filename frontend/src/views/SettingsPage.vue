@@ -46,6 +46,83 @@ const weather = reactive({
 const loading = ref(true)
 const errorMsg = ref('')
 const delConfirm = ref({ open: false, type: null, id: null, name: '' })
+const urlDirtyHint = reactive({}) // { text: true, image: true, ... } 失焦后已自动清洗
+
+/**
+ * 对 baseUrl / location 这种极易粘成 Markdown 行的字段做前端清洗（与后端 UrlSanitizer.java 同语义）。
+ * 用户截图里实测： "> `https://dashscope.aliyuncs.com/api/v1/.../video-synthesis`platform.qq..."
+ *   —— 前缀的 "` >" 导致 Java URI 抛 Illegal character in scheme name at index 0。
+ */
+const URL_ENVELOPE = new Set([' ', '\t', '\n', '\r', '\u00a0', '`', "'", '"', '<', '>', '(', ')', '[', ']', '{', '}', '|', '_', '*', '>', '：', ':', '·', '•'])
+const ACTION_SUFFIX_RE = /\/(videos\/generations|images\/generations|audio\/speech|audio\/transcriptions|chat\/completions|completions|embeddings|models|services\/aigc\/video-generation\/video-synthesis[^/]*|services\/aigc\/multimodal-generation\/generation[^/]*|services\/aigc\/image-generation\/generation[^/]*)$/i
+function sanitizeBaseUrlClient(raw) {
+  if (raw == null) return raw
+  let s = String(raw).replace(/\r/g, '').trim()
+  if (!s) return s
+  // 1. 去首尾 Markdown 包络字符（可能多层）
+  let changed
+  do {
+    changed = false
+    while (s && URL_ENVELOPE.has(s[0])) { s = s.slice(1); changed = true }
+    while (s && URL_ENVELOPE.has(s[s.length - 1])) { s = s.slice(0, -1); changed = true }
+  } while (changed && s)
+  if (!s) return s
+  // 2. 找到第一个 http/https 位置，砍掉前面垃圾
+  const httpIdx = Math.min(...[s.indexOf('http://'), s.indexOf('https://')].filter(x => x >= 0))
+  if (Number.isFinite(httpIdx) && httpIdx > 0) s = s.slice(httpIdx)
+  // 3. 保留到「第一个非法 URL 字符」之前（中文、反引号、控制符、全角）
+  const good = []
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i], code = s.charCodeAt(i)
+    if (code <= 0x20 || code > 126 || c === '`' || c === '"' || c === "'" || c === '<' || c === '>') {
+      if (c === '?' || c === '#' || c === '&' || c === '=') { good.push(c); continue }
+      break
+    }
+    good.push(c)
+  }
+  s = good.join('')
+  // 4. 去掉尾部 action 路径（防止用户把 endpoint 塞进 baseUrl → 404），最多 3 次
+  for (let i = 0; i < 3; i++) {
+    const m = s.match(ACTION_SUFFIX_RE)
+    if (!m || m.index + m[0].length !== s.length) break
+    s = s.slice(0, m.index)
+  }
+  // 5. 去掉尾部多余 / 但保留 :// 之后的双斜杠
+  while (s.length > 1 && s.endsWith('/')) {
+    if (!s.includes('://')) break
+    const schemeSep = s.indexOf('://')
+    let j = s.length - 1, count = 0
+    while (j >= 0 && s[j] === '/') { j--; count++ }
+    if (count <= 1) break
+    if (j <= schemeSep + 2) break
+    s = s.slice(0, -1)
+  }
+  return s.trim()
+}
+function cleanCurrentBaseUrl(tabKey, warnDirtyToo = true) {
+  if (!tabKey || !g[tabKey]) return
+  const st = g[tabKey]
+  const orig = st.form.baseUrl || ''
+  const cleaned = sanitizeBaseUrlClient(orig)
+  if (cleaned !== orig) {
+    st.form.baseUrl = cleaned
+    st.saved = false
+    urlDirtyHint[tabKey] = true
+  }
+  // model 也顺手 trim 一下
+  if (st.form.model && st.form.model !== st.form.model.trim()) {
+    st.form.model = st.form.model.trim()
+    st.saved = false
+  }
+}
+function cleanWeatherHost() {
+  const orig = weather.form.apiHost || ''
+  const cleaned = sanitizeBaseUrlClient(orig)
+  if (cleaned !== orig) {
+    weather.form.apiHost = cleaned
+    weather.saved = false
+  }
+}
 
 // 提供给模板：当前"普通 Tab"状态（如果当前是天气 Tab 则为 null）
 const currentGeneric = computed(() => {
@@ -388,10 +465,15 @@ onMounted(loadAll)
           <input v-model="currentGeneric.form.name" :placeholder="`如 ${activeTab.nameHint}`" @input="currentGeneric.saved = false" />
         </div>
         <div class="config-item">
-          <label class="lbl">API Base URL</label>
-          <input v-model="currentGeneric.form.baseUrl" placeholder="例如 https://api.openai.com/v1" @input="currentGeneric.saved = false" />
+          <label class="lbl">API Base URL <button type="button" class="mini-btn" @click="cleanCurrentBaseUrl(tab)">🧼 一键清洗</button></label>
+          <input v-model="currentGeneric.form.baseUrl" placeholder="例如 https://api.openai.com/v1 — 不要把具体 /videos/generations 粘进来"
+                 @input="currentGeneric.saved = false; urlDirtyHint[tab] = false"
+                 @blur="cleanCurrentBaseUrl(tab)" />
           <p class="hint" v-if="currentProviders.find(q => q.code === currentGeneric.form.providerCode)">
             预设：{{ currentProviders.find(q => q.code === currentGeneric.form.providerCode).baseUrl || '（自定义，请填写）' }}
+          </p>
+          <p class="hint warn" v-if="urlDirtyHint[tab]">
+            ⚠️ 检测到你粘贴了 Markdown 包络字符（> ` https://…）或把具体接口路径粘进来了 — 已自动清洗为合法 baseUrl。如果清洗不对请手动改。
           </p>
         </div>
         <div class="config-item">
@@ -401,9 +483,14 @@ onMounted(loadAll)
         </div>
         <div class="config-item">
           <label class="lbl">模型 ID</label>
-          <input v-model="currentGeneric.form.model" :placeholder="activeTab.type==='IMAGE'?'如 dall-e-3':activeTab.type==='AUDIO'?'如 tts-1':activeTab.type==='VIDEO'?'如 seedance-1-0-pro':'如 gpt-4o-mini'" @input="currentGeneric.saved = false" />
+          <input v-model="currentGeneric.form.model"
+                 :placeholder="activeTab.type==='IMAGE'?'如 dall-e-3':activeTab.type==='AUDIO'?'如 tts-1':activeTab.type==='VIDEO'?'如 seedance-1-0-pro 或 wan2.1-t2v-turbo':'如 gpt-4o-mini'"
+                 @input="currentGeneric.saved = false" @blur="cleanCurrentBaseUrl(tab)" />
           <p class="hint" v-if="currentProviders.find(q => q.code === currentGeneric.form.providerCode)?.defaultModel">
             推荐：{{ currentProviders.find(q => q.code === currentGeneric.form.providerCode).defaultModel }}
+          </p>
+          <p class="hint" v-if="activeTab.type === 'VIDEO'">
+            🎬 万相（Dashscope）视频：本系统已强制走原生异步接口，无需把具体接口地址写进 Base URL（否则会 404）。Base URL 留 <code>https://dashscope.aliyuncs.com/compatible-mode/v1</code> 或只写 dashscope 域名，系统会自动路由。
           </p>
         </div>
         <div class="config-item">
@@ -662,10 +749,18 @@ onMounted(loadAll)
 .lbl { display: block; font-size: 13px; font-weight: 500; margin-bottom: 8px; }
 .required { color: var(--danger); }
 .hint { font-size: 12px; color: var(--text-muted); margin-top: 6px; line-height: 1.6; }
+.hint.warn {
+  color: #92400e;
+  background: #FFF7E6;
+  border: 1px solid #F7D08A;
+  border-radius: 6px;
+  padding: 6px 9px;
+}
 .hint code {
   background: #F9FAFB; border: 1px solid var(--border);
   padding: 1px 6px; border-radius: 4px; font-size: 11px;
 }
+.lbl .mini-btn { margin-left: 8px; }
 
 .save-area {
   display: flex; flex-direction: column; align-items: center;

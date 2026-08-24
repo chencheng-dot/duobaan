@@ -21,6 +21,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import org.example.duobaan.util.UrlSanitizer;
 import tools.jackson.databind.ObjectMapper;
 
 @Service
@@ -62,7 +63,8 @@ public class ApiProfileService {
     // ================= 仅内部使用：返回带明文 Key 的对象（绝不对外传递） =================
 
     public Optional<ApiProfile> getActivePlain(ApiProfileType type) {
-        return repo.findByProfileTypeAndIsActiveTrue(type);
+        return repo.findByProfileTypeAndIsActiveTrue(type)
+                .map(ApiProfileService::cleanForUse);
     }
 
     // ========================= 写操作：create / update / setActive / delete ========================
@@ -193,9 +195,9 @@ public class ApiProfileService {
 
     private void applyInbound(ApiProfile target, ApiProfileInbound in, boolean creating) {
         if (creating) target.setProfileType(in.profileType());
-        target.setName(in.name().trim());
+        target.setName(trim(in.name()));
         target.setProvider(in.provider());
-        target.setBaseUrl(trim(in.baseUrl()));
+        target.setBaseUrl(UrlSanitizer.sanitizeBaseUrl(in.baseUrl()));
         target.setModel(trim(in.model()));
         if (creating) {
             target.setApiKey(in.apiKey());
@@ -205,6 +207,16 @@ public class ApiProfileService {
         target.setLocation(trim(in.location()));
         target.setCacheTtlSeconds(in.cacheTtlSeconds());
         target.setTimeoutSeconds(in.timeoutSeconds());
+    }
+
+    /** 读路径兜底清洗：即便是老数据（脏 baseUrl/model），到业务层用之前仍强制 clean 一次，避免 Illegal scheme / 404 */
+    private static ApiProfile cleanForUse(ApiProfile p) {
+        if (p == null) return null;
+        String cleanUrl = UrlSanitizer.sanitizeBaseUrl(p.getBaseUrl());
+        if (cleanUrl != null && !cleanUrl.equals(p.getBaseUrl())) p.setBaseUrl(cleanUrl);
+        String cleanModel = trim(p.getModel());
+        if (cleanModel != null && !cleanModel.equals(p.getModel())) p.setModel(cleanModel);
+        return p;
     }
 
     private static String trim(String s) {

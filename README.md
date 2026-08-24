@@ -606,6 +606,55 @@ MIT
 
 ---
 
+### v3.3.1 🎬 修复：视频模型反复报错（Illegal character in scheme + HTTP 404）— URL 强力清洗 + 万相视频原生分支（用户报告 bug）
+
+**Bug 现象（用户截图实锤，两个错误叠加）**：
+
+1. `Illegal character in scheme name at index 0: > `https://dashscope.aliyuncs.com/.../video-synthesis`…`
+   - 根因：用户从 Markdown 复制 Dashscope 官方文档 URL 时，把前导 `>` + 反引号 `` ` `` + 尾随 `platform.qq…` 一行整个粘进了「API Base URL」输入框。Java `URI.create(...)` 对 scheme（冒号前部分）要求必须是 `[a-zA-Z][a-zA-Z0-9+.-]*`，`>` 不在此列 → 直接抛 IllegalArgumentException。
+2. HTTP 404：「模型 ID 或厂商地址有误，请核对预设模型或自定义 baseUrl」
+   - 根因：Dashscope（阿里通义万相）**视频接口并不走 OpenAI 兼容的 `/videos/generations`**（官方这一路长期未开放，或仅部分模型开放）。正确做法是用 **Dashscope 原生异步接口** `POST https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis`，请求体是 `{model, input:{prompt}, parameters:{size, duration_seconds}}`，且**必须**带请求头 `X-DashScope-Async: enable`。之前的预设把 baseUrl 写成 `…/compatible-mode/v1` + 固定 append `/videos/generations` → 对万相必然 404。
+3. （次级）用户把 **具体 action 路径**（`/api/v1/services/.../video-synthesis`）整段粘贴进 baseUrl，后端再 append `/videos/generations` → 生成的 URL 是畸形长串，无论如何都会 404。
+
+**修复方案（前后端 5 层同时兜底，用户下次再粘脏数据也不怕）**
+
+1. **新增 `UrlSanitizer.java`（后端强力清洗）** — 6 步顺序敏感处理：
+   - 去两端空白 + Markdown 包络字符（`` ` > < ( ) [ ] { } " ' * _ 全角冒号… ``），循环剥到没有为止
+   - 定位第一个 `http://` 或 `https://`，截掉前面的垃圾字符（对应 bug 1）
+   - 扫到「非法 URL 字符」（中文、反引号、ASCII > 126）立刻截断；只保留 `? # & =` 查询串符号
+   - **尾部 action 路径自动砍掉**（最多 3 轮）：`/videos/generations`、`/images/generations`、`/services/aigc/.../video-synthesis`、`/chat/completions`、`/completions` 等（对应 bug 3，用户把 endpoint 塞进 baseUrl 也能自动还原成根）
+   - 尾部多余 `/` 统一归一成 1 个，但**不破坏 `scheme://`**
+   - Node 脚本复现你截图的脏数据：`> `https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis`platform.q...` → ✅ 洗成 `https://dashscope.aliyuncs.com/api/v1`
+2. **入库 + 读路径双写清洗**：
+   - 写路径：[ApiProfileService#applyInbound](src/main/java/org/example/duobaan/service/ApiProfileService.java) 里 `setBaseUrl(UrlSanitizer.sanitizeBaseUrl(in.baseUrl()))`
+   - 读路径：`getActivePlain(type)` 里 `.map(cleanForUse)`，即便是老脏数据，**到业务层用之前再强制洗一遍**，DB 旧记录也能直接恢复正常（不用你手动删了重填）
+3. **MediaService 按厂商分流（Dashscope 视频强制走原生异步）**：
+   - 新增 `vendorOf(p)` 识别 5 类：`OPENAI_COMPAT / DASHSCOPE / KUAISHOU_KLING / VOLC_ARK / MINIMAX`（同时查 provider 名 + baseUrl 特征域名）
+   - `vendor=DASHSCOPE` 时：**忽略用户写进 baseUrl 的任何万相地址**，直接固定请求 `https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis` + 请求头 `X-DashScope-Async: enable` + 专有的 `{model, input:{prompt}, parameters:{size, duration_seconds}}` body 格式
+   - `size` 映射：16:9 → `1280*720`，9:16 → `720*1280`，1:1 → `720*720`
+   - 响应解析新增 Dashscope 异步识别：`output.task_id` / `output.task_status` / `request_id` → pending 状态返回 `MediaResponse.video([], "pending", "万相任务已提交(task_id=xxx)…稍后点刷新查询")`，用户明确知道"提交成功只是没生成完"；错误字段兼容 Dashscope 的 `code/message` 两字段
+   - 其他 4 模态（图/TTS/ASR）endpoint 构建都加了 `dedupSuffix`：当 baseUrl 已被洗得比较干净但仍带 action 时，再次去重避免 `/images/generations/images/generations` 这种重复
+4. **[MediaResponse.java](src/main/java/org/example/duobaan/model/dto/MediaResponse.java)** record 结构升级：新增 `message` 字段 + 3 参 `video(items, status, message)` 工厂方法，Dashscope pending 状态能把"task_id + 稍后刷新"提示直接塞进去。
+5. **前端 SettingsPage 用户体验兜底**：
+   - 「API Base URL」输入框失焦自动跑 `sanitizeBaseUrlClient`（与后端同语义 JS 版本）；模型 ID 输入失焦也联动
+   - 标签右侧加「🧼 一键清洗」按钮
+   - 若清洗后内容发生变动，底下会出现一块**橙色警告**（`hint.warn` 样式）：「⚠️ 检测到你粘贴了 Markdown 包络字符… — 已自动清洗为合法 baseUrl」
+   - 视频模型 Tab 下模型 ID 输入框多一段提示：「🎬 万相视频：系统已强制走原生异步接口，Base URL 不用写具体接口地址（否则会 404）」
+   - 预设占位符也升级成了 seedance-1-0-pro **或** `wan2.1-t2v-turbo`（万相常用）
+
+**端到端实测**
+
+| 场景 | 结果 |
+|---|---|
+| Node 复现你截图脏 URL → 客户端清洗函数 | ✅ `https://dashscope.aliyuncs.com/api/v1`（Illegal character 错误永远不会再出现） |
+| 后端 `mvnw compile`（JDK 17 `D:\JKD 17`） | ✅ 通过，3 新源 UrlSanitizer / MediaService 大改 / ApiProfileService +1 辅助方法，共 47 Java 源 |
+| 前端 Vite build（46 modules） | ✅ 165 KB JS / 30 KB CSS / 60 KB gzip，无语法错误 |
+| SettingsPage dirty hint 样式 | ✅ `.hint.warn` 新增 + `.mini-btn` margin 修正，UI 纯白极简风格保持一致 |
+
+**文件变更统计**：+1 新文件 `UrlSanitizer.java`，修改 `ApiProfileService.java / MediaService.java / MediaResponse.java / SettingsPage.vue`，合计约 +520 / -90。
+
+---
+
 ### v3.3.0 🔧 修复：说「把任务转到明天」只回复不动手 — 新增「任务指令自动执行器」（用户报告 bug，前后两轮修复）
 
 **Bug 现象（第一轮：v3.2.x 遗留问题 → v3.3.0 启动修复）**：办公对话里说「把这个任务转移到明天」，助手正确回复了一段 `已将任务…移至明日：```json [{"title":"…","date":"明天","status":"TODO"}] ````，**但右侧流程表「今日」仍保留 1 条、「明日」仍 0 条** — 因为 ChatPanel 只把 JSON 当文本渲染，从没解析并调用 `/api/tasks/{id}/migrate`。
