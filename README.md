@@ -493,3 +493,50 @@ MIT
 - 前后端编译验证：后端 53 源文件编译通过、前端 44 模块构建成功、端到端测试三栏历史/软删/物理删除全部走通
 
 ---
+
+### v3.1.0 💬（本次更新：对话历史持久化 — 刷新不再清空）
+
+**问题背景**：之前和大模型对话后，一刷新浏览器消息全没了。原因是前端仅用内存 `messages` 数组保存气泡，后端 `chat_message` 表虽然建了但 SSE/chat 接口完全没往里面写，也没有拉历史的接口。
+
+**写入链路 + 重建链路 双端打通**（对应「刷新后状态丢失」类问题标准解法）：
+
+**1. 写入链路：对话双方即时落库，流式累积 done 时一次性入库**
+
+- 新增 [ChatService.java](src/main/java/org/example/duobaan/service/ChatService.java)：
+  - `appendAndTrim(mode, role, content)`：单条写入后，`countByMode` 统计该 mode 总数，**> 50 则物理删除最旧 N 条**（`deleteAllByIdInBatch`），数据库严格限长，绝不无限增长。
+  - `getHistory(mode, limit)`：按 `(mode, created_at DESC, id)` 复合索引取最近 limit 条，再反转为时间正序返回给 UI。
+- [LlmController.java](src/main/java/org/example/duobaan/controller/LlmController.java) 改造：
+  - **非流式 `/chat`**：`入库 user message → 调 llmGateway → 入库 assistant reply` 三步串行，异常也落降级提示。
+  - **流式 `/chat/stream`**：发 SSE 前先入库 user message；过程中用 `StringBuilder` 累积每片 delta，在 `done` 事件时**一次性入库完整助手回复**（避免流式逐 token 写 50 次库）；出错则把"已累积 delta + 错误提示"一并入库，刷新后用户能看到断线前收到的内容。
+- 新增复合索引 `idx_chat_mode_created (mode, created_at DESC, id DESC)`：history 查询与 trim 删除都走索引，50 条规模下全是毫秒级。
+- SchemaMigrator 幂等迁移：为老库判断 `information_schema.STATISTICS`，缺索引自动 ALTER，不需要手动 DROP 表。
+
+**2. 重建链路：ChatPanel onMounted 拉历史，刷新即渲染**
+
+- 前端 `api/index.js`：+ `getChatHistory(mode, limit = 50)`，封装 `GET /api/llm/history`。
+- [ChatPanel.vue](frontend/src/components/ChatPanel.vue) 引入 `onMounted`：组件挂载完成后立即调用 `getChatHistory(props.mode, 50)`，将返回的 `[{role, content}]` 数组赋给 `messages`，并 `scrollToBottom()` 定位到底部最后一条。
+- WORK / DOPAMINE 两种 mode **完全隔离**：办公对话和多巴胺推荐各自存 50 条，互不干扰。
+
+**3. 为什么没选 Redis？**
+
+用户原话是「用 Redis 缓存或者 其他的」。评估后选 **MySQL + 限长 50 条**，理由：
+- 现有项目已用 MySQL，额外引入 Redis 需要本地/服务器部署一个新进程，部署门槛明显抬高（对普通用户不友好）。
+- 每 mode 最多 50 条 × 2 mode = 100 行，配合复合索引查询 ≈ Redis 的响应量级（都是 <1ms）。
+- MySQL 天然持久化，不怕进程重启/机器断电，作为「会话存档」比纯 Redis 更稳（即便以后想加热缓存层，也可在 ChatService 上再叠加）。
+
+**4. 接口与 API 文档同步更新**
+
+- README 大模型接口表新增 `POST /api/llm/chat` 非流式条目、以及新接口 `GET /api/llm/history?mode=WORK|DOPAMINE&limit=50`。
+- 接口注释说明「对话自动入库 chat_message / 前端挂载时恢复」。
+
+**5. 端到端实测**
+
+| 场景 | 结果 |
+|---|---|
+| 初始 GET history（WORK） | ✅ 0 条 |
+| POST `/chat` 发一句「你好」→ GET history | ✅ 出现 2 条（user + 助手真实回复，你这边已配好 Key 不是降级提示） |
+| 再 GET history（DOPAMINE） | ✅ 0 条（两 mode 严格隔离） |
+| DOPAMINE 发「推荐午餐」→ 再 GET history | ✅ 2 条，WORK 侧仍保持自己的 2 条 |
+| 刷新浏览器 → ChatPanel onMounted 触发 | ✅ 对应 mode 的 2 条消息自动渲染并滚动到底部，**完全恢复上次对话** ✨ |
+
+---
