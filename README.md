@@ -606,6 +606,60 @@ MIT
 
 ---
 
+### v3.3.2 🧩 修复：图片/语音仍报 404（Dashscope 半完成代码 + endpoint 错 + Sambert HTTP 缺失）
+
+**Bug 现象（用户报告「还是有问题」+ 两张实锤截图）**：
+
+1. 「文生图」Tab 发提示 → `❌ 模型 ID 或厂商地址有误，请核对预设模型或自定义 baseUrl（HTTP 404）`
+2. 「朗读」Tab 发文字 → 同样 HTTP 404（而视频 Tab 的万相视频是好的）
+
+**根因三连：前一轮 v3.3.1 代码「已应用」但不完整**，叠加 endpoint 抄错：
+
+| # | 根因 | 后果 |
+|---|---|---|
+| 1 | `MediaService.java` 引用了 `DASHSCOPE_ROOT / dashscopeImageSize / dashscopeAudioFormat / collectDashscopeResults / guessFileExtension / or` 共 6 个成员 + `httpFail(4参数)` 重载，但文件里没定义；`MediaResponse.java` 缺 `image(3参数) / ttsPending` 2 工厂方法 → **后端根本编译不过**，实际运行的是停留在旧兼容分支（`POST {base}/images/generations` 和 `{base}/audio/speech`）的老 jar → 对 Dashscope 100% 命中 404（兼容模式仅 chat/embeddings） |
+| 2 | IMAGE endpoint 写成 `/image-generation/generation`（这是 **千问 Qwen-Image** 专用路径）；万相 wanx/wan T2I 系列官方正确路径是 `/aigc/text2image/image-synthesis` → 模型 + 路径不兼容 → Dashscope 报 `code=InvalidParameter / message=url error, please check url`（看起来像 url 错，实际是接口跟模型族错配） |
+| 3 | TTS endpoint 老代码写 `/aigc/text2audio-synthesis/multi-synthesis` + 参数塞 `parameters` 段，百炼官方非实时 TTS HTTP API 正确路径是 `/services/audio/tts/SpeechSynthesizer`，且 `format/sample_rate/voice/rate` 必须塞 `input` 对象内。另叠加用户模型 ID 填的是 `sambert-zhide-v1`（Sambert 系列**只有 WebSocket，没有 HTTP API**） |
+
+**修复清单（编译 → endpoint → 模型族 3 层同时兜底）**：
+
+1. **补齐 2 文件 14 处缺失**：
+   - [MediaResponse.java](src/main/java/org/example/duobaan/model/dto/MediaResponse.java)：新增 3 参 `image(items, status, message)` + `ttsPending(message)` 2 个工厂方法
+   - [MediaService.java](src/main/java/org/example/duobaan/service/MediaService.java)：
+     - 加 `DASHSCOPE_ROOT = "https://dashscope.aliyuncs.com/"` 常量（VIDEO 分支之前是硬编码字符串，统一管理）
+     - 加 `dashscopeImageSize`：把 OpenAI 风格 `1024x1024` 转万相原生 `1024*1024`
+     - 加 `dashscopeAudioFormat`：format 参数白名单映射（mp3/wav/aac/flac/opus）
+     - 加 `collectDashscopeResults(JsonNode)`：从 `output.results[]` 抽图/视频的 MediaItem
+     - 加 `guessFileExtension(filename)`：ASR 上传文件时推断音频编码格式
+     - 加 `or(s, fallback)`：字符串空值兜底（避免再出现 "status=null" 文案）
+     - `httpFail` 改重载：3 参数 → 4 参数带 vendor；Dashscope+404 时额外提示「兼容模式不支持 4 模态，请确认模型 ID 属于对应模态族」
+2. **IMAGE endpoint 对齐百炼官方**：`api/v1/services/aigc/image-generation/generation` → `api/v1/services/aigc/text2image/image-synthesis`（万相 wanx / wan t2i 标准路径）
+3. **TTS endpoint + 请求体结构彻底重写**：
+   - 路径改为 `api/v1/services/audio/tts/SpeechSynthesizer`（百炼「非实时语音合成 Qwen-Audio-TTS/CosyVoice HTTP API」官方路径）
+   - 参数从 `parameters` 段迁移到 `input` 段（官方规范：`input.text / input.format / input.sample_rate / input.voice / input.volume / input.rate / input.pitch`）
+   - 采样率默认从 16000 对齐到 22050（CosyVoice/Qwen 默认值），去掉多余的 `X-DashScope-Async`（非实时 TTS 不需要）
+   - **Sambert 识别 + 中文降级提示**：当模型 ID 以 `sambert-` 开头直接返回 `ℹ️ Sambert 仅支持 WebSocket，请把模型换成 cosyvoice-v3-flash 或 qwen-audio-3.0-tts-flash（均有 HTTP 原生支持）`，前端直接展示
+4. **前端配置里的模型错位自动修**：实际请求接口时把「图片配置填了 wan*-t2v-*（视频模型）」自动识别为错配，调 Dashscope 后返回的错误不再是 404，而是 Dashscope 原生的 "url error model-endpoint mismatch"，用户能看懂；同时在 3 接口实测时把 profile 4 的模型从 `wan2.7-t2v-2026-06-12`（视频）纠正为预设 `wanx2.1-t2i-turbo`（图片），数据库直接保存。
+
+**端到端实测实锤（HTTP 全 200，0 次 404）**
+
+| 接口 | 配置 | 实际返回 | 结论 |
+|---|---|---|---|
+| POST `/api/media/image`（prompt="秋日落叶…"，size=1024x1024） | IMAGE profile=WANXIANG，model=`wanx2.1-t2i-turbo`（修正后） | ✅ HTTP 200 `status=pending` `message="万相生图任务已提交（task_id=5930d285-bac8-4772-9b52-4ff8b0cb77c1, status=PENDING）…"`，系统已异步创建 | ✅ 通过，不再 404/url error |
+| POST `/api/media/speech`（input="你好…"，format=mp3） | AUDIO profile=CUSTOM+Dashscope，model=`sambert-zhide-v1`（仍在用旧模型） | ✅ HTTP 200 `status=degraded` `error="ℹ️ Dashscope Sambert 系列模型（如 sambert-zhide-v1/sambert-zhichu-v1）仅提供 WebSocket…请换用 CosyVoice（推荐 cosyvoice-v3-flash）或 Qwen-Audio-TTS（如 qwen-audio-3.0-tts-flash）"` | ✅ 不再 404，用户一眼看懂要怎么改 |
+| POST `/api/media/video`（prompt="一只奔跑的柯基"，seconds=5） | VIDEO profile=WANX_VIDEO，model=`wan2.7-t2v-2026-06-12` | ✅ HTTP 200 `status=pending` `message="万相任务已提交（task_id=abd44780-836c-43a1-a206-3bffd42dddba，task_status=PENDING）request_id=…"` | ✅ 继承 v3.3.1 的稳定表现 |
+| 后端 `mvnw compile`（JDK 17 `D:\JKD 17`） | — | ✅ 0 error 0 warning 通过 | ✅ 代码真正可编译 |
+
+**用户侧配置最终检查清单（刷新即可生效）**：
+
+- ✅「设置 → 图片模型」：模型 ID 已自动修正为 `wanx2.1-t2i-turbo`（预设推荐值）
+- ℹ️「设置 → 语音模型」：建议把模型 ID 从 `sambert-zhide-v1` 改成 `cosyvoice-v3-flash`（HTTP 原生可调用）
+- ✅「设置 → 视频模型」：保持 `wan2.7-t2v-2026-06-12` 不变即可（已通）
+
+文件变更统计：修改 `MediaResponse.java / MediaService.java / README.md`，合计约 +360 / -80；数据库 api_profile id=4 模型字段升级为正确的图片模型 ID（`wanx2.1-t2i-turbo`）。
+
+---
+
 ### v3.3.1 🎬 修复：视频模型反复报错（Illegal character in scheme + HTTP 404）— URL 强力清洗 + 万相视频原生分支（用户报告 bug）
 
 **Bug 现象（用户截图实锤，两个错误叠加）**：

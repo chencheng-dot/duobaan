@@ -35,8 +35,16 @@ public record MediaResponse(
     public static MediaResponse tts(byte[] bytes, String mime, String filename) {
         return new MediaResponse("AUDIO_TTS", "succeeded", null, null, bytes, mime, filename, null, List.of());
     }
+    /** TTS 异步 pending：语音合成任务已提交但暂未返回二进制，前端稍后刷新拉取 */
+    public static MediaResponse ttsPending(String message) {
+        return new MediaResponse("AUDIO_TTS", "pending", null, null, null, null, null, message, List.of());
+    }
     public static MediaResponse error(String kind, String friendly) {
         return new MediaResponse(kind, "degraded", friendly, null, null, null, null, null, List.of());
+    }
+    /** 图片 pending：Dashscope 异步任务已提交但暂未返回结果 URL */
+    public static MediaResponse image(List<MediaItem> items, String status, String message) {
+        return new MediaResponse("IMAGE", status, null, null, null, null, null, message, items);
     }
 
     /** 单个图片 / 视频条目 */

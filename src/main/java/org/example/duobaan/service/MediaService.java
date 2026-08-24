@@ -42,6 +42,13 @@ public class MediaService {
     private static final int DEFAULT_TIMEOUT_AUDIO = 30;   // TTS / Whisper 转写短音频很快
     private static final int DEFAULT_TIMEOUT_VIDEO = 180;  // 视频生成慢，默认 3 分钟
 
+    /**
+     * Dashscope（阿里通义/万相/Sambert/CosyVoice/Paraformer）原生接口根。
+     * 必须用原生根而非 compatible-mode/v1：兼容模式只开放 chat/completions + embeddings，
+     * 图/TTS/ASR/视频 4 模态都必须走 https://dashscope.aliyuncs.com/api/v1/services/aigc/* 系列。
+     */
+    private static final String DASHSCOPE_ROOT = "https://dashscope.aliyuncs.com/";
+
     private final RestClient restClient;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -77,7 +84,51 @@ public class MediaService {
         ApiProfile p = opt.get();
         int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0
                 ? p.getTimeoutSeconds() : DEFAULT_TIMEOUT_IMG;
+        final ProviderVendor vendor = vendorOf(p);
         try {
+            // —— Dashscope（万相）原生分支：compatible-mode/v1 不支持 /images/generations，必须用原生 aigc 路径 ——
+            if (vendor == ProviderVendor.DASHSCOPE) {
+                // 百炼官方原生接口：POST https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis
+                // 注：/image-generation/generation 是千问 Qwen-Image 系列接口，与万相 wanx / wan t2i 不兼容会报 url error
+                final String endpoint = DASHSCOPE_ROOT + "api/v1/services/aigc/text2image/image-synthesis";
+                String model = orModel(p.getModel(), "wanx2.1-t2i-turbo");
+                String sizeParam = dashscopeImageSize(StringUtils.hasText(size) ? size : "1024x1024");
+                int nVal = (n == null || n < 1) ? 1 : Math.min(n, 4);
+                var node = objectMapper.createObjectNode();
+                node.put("model", model);
+                var input = node.putObject("input");
+                input.put("prompt", prompt);
+                var params = node.putObject("parameters");
+                params.put("size", sizeParam);
+                params.put("n", nVal);
+                if (StringUtils.hasText(style)) params.put("style", style);
+                String body = objectMapper.writeValueAsString(node);
+                HttpRequest req = HttpRequest.newBuilder().uri(URI.create(endpoint))
+                        .timeout(Duration.ofSeconds(timeout))
+                        .header("Authorization", "Bearer " + p.getApiKey())
+                        .header("X-DashScope-Async", "enable")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                        .build();
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if (resp.statusCode() != 200) return httpFail("IMAGE", resp.statusCode(), resp.body(), vendor);
+                JsonNode root = objectMapper.readTree(resp.body());
+                String taskId = root.path("output").path("task_id").asText(null);
+                String taskStatus = root.path("output").path("task_status").asText(null);
+                // 万相原生是异步：提交只给 task_id；如果任务立刻有 results（极少），直接抽 url
+                List<MediaItem> items = collectDashscopeResults(root.path("output").path("results"));
+                if (items.isEmpty() && StringUtils.hasText(taskId)) {
+                    return MediaResponse.image(List.of(), "pending",
+                            "万相生图任务已提交（task_id=" + taskId + ", status=" + or(taskStatus, "PENDING") + "），稍后刷新即可看到结果。");
+                }
+                if (items.isEmpty()) {
+                    String err = root.path("message").asText(null);
+                    return MediaResponse.error("IMAGE",
+                            StringUtils.hasText(err) ? "模型返回错误：" + err : "万相未返回图片地址（status=" + taskStatus + "）");
+                }
+                return MediaResponse.image(items);
+            }
+
             final String action = "images/generations";
             String endpoint = ensureTrailing(p.getBaseUrl()) + action;
             endpoint = dedupSuffix(endpoint, "/" + action);
@@ -96,7 +147,7 @@ public class MediaService {
                     .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                     .build();
             HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (resp.statusCode() != 200) return httpFail("IMAGE", resp.statusCode(), resp.body());
+            if (resp.statusCode() != 200) return httpFail("IMAGE", resp.statusCode(), resp.body(), vendor);
 
             JsonNode root = objectMapper.readTree(resp.body());
             List<MediaItem> items = new ArrayList<>();
@@ -131,7 +182,71 @@ public class MediaService {
         ApiProfile p = opt.get();
         int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0
                 ? p.getTimeoutSeconds() : DEFAULT_TIMEOUT_AUDIO;
+        final ProviderVendor vendor = vendorOf(p);
         try {
+            // —— Dashscope（Sambert / CosyVoice / Qwen-Audio-TTS）原生分支：compatible-mode/v1 没有 /audio/speech ——
+            if (vendor == ProviderVendor.DASHSCOPE) {
+                String model = orModel(p.getModel(), "cosyvoice-v3-flash");
+                // Sambert 仅支持 WebSocket（wss://.../api-ws/v1/inference），无 HTTP API，直接给友好降级建议
+                if (model.toLowerCase().startsWith("sambert-")) {
+                    return MediaResponse.error("AUDIO_TTS",
+                            "ℹ️ Dashscope Sambert 系列模型（如 sambert-zhide-v1/sambert-zhichu-v1）仅提供 WebSocket 接口，" +
+                                    "暂时无法通过 HTTP API 调用。请到「设置 → 语音模型」把模型 ID 换成支持 HTTP 的 CosyVoice（推荐 cosyvoice-v3-flash）" +
+                                    "或 Qwen-Audio-TTS（如 qwen-audio-3.0-tts-flash）即可正常使用。");
+                }
+                String outFormat = dashscopeAudioFormat(StringUtils.hasText(format) ? format : "mp3");
+                int sampleRate = 22050;
+                String vol = StringUtils.hasText(voice) ? voice : null; // 当说话人/音色透传
+                double rateVal = speed == null ? 1.0 : speed;
+                // 百炼官方非实时 TTS HTTP API：POST /api/v1/services/audio/tts/SpeechSynthesizer
+                // 参数约定（与文生图不同）：format/sample_rate/voice/rate 等全部放在 input 对象内，不是 parameters
+                final String endpoint = DASHSCOPE_ROOT + "api/v1/services/audio/tts/SpeechSynthesizer";
+                var node = objectMapper.createObjectNode();
+                node.put("model", model);
+                var inObj = node.putObject("input");
+                inObj.put("text", input);
+                inObj.put("format", outFormat);
+                inObj.put("sample_rate", sampleRate);
+                if (StringUtils.hasText(vol)) inObj.put("voice", vol);
+                inObj.put("volume", 50);
+                inObj.put("rate", rateVal);
+                inObj.put("pitch", 1.0);
+                String body = objectMapper.writeValueAsString(node);
+                HttpRequest req = HttpRequest.newBuilder().uri(URI.create(endpoint))
+                        .timeout(Duration.ofSeconds(timeout))
+                        .header("Authorization", "Bearer " + p.getApiKey())
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                        .build();
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if (resp.statusCode() != 200) return httpFail("AUDIO_TTS", resp.statusCode(), resp.body(), vendor);
+                JsonNode root = objectMapper.readTree(resp.body());
+                String audioUrl = root.path("output").path("audio_url").asText(null);
+                if (!StringUtils.hasText(audioUrl) && root.path("output").has("results")) {
+                    for (JsonNode r : root.path("output").path("results")) {
+                        audioUrl = r.path("audio_url").asText(null);
+                        if (StringUtils.hasText(audioUrl)) break;
+                    }
+                }
+                if (StringUtils.hasText(audioUrl)) {
+                    // 直接拉取音频二进制 → TTS 响应
+                    byte[] bytes = httpClient.send(
+                            HttpRequest.newBuilder().uri(URI.create(audioUrl)).timeout(Duration.ofSeconds(timeout)).GET().build(),
+                            HttpResponse.BodyHandlers.ofByteArray()).body();
+                    return MediaResponse.tts(bytes, mimeForAudio(outFormat), "speech." + outFormat);
+                }
+                String taskId = root.path("output").path("task_id").asText(null);
+                String taskStatus = root.path("output").path("task_status").asText(null);
+                if (StringUtils.hasText(taskId)) {
+                    // 异步 pending：给 TTS 响应 message，前端 ChatPanel 会显示状态
+                    return MediaResponse.ttsPending(
+                            "Dashscope 语音合成任务已提交（task_id=" + taskId + ", status=" + or(taskStatus, "PENDING") + "），几秒后请点击下方的刷新按钮获取音频。");
+                }
+                String err = root.path("message").asText(null);
+                return MediaResponse.error("AUDIO_TTS",
+                        StringUtils.hasText(err) ? "模型返回错误：" + err : "Dashscope 未返回音频地址（status=" + taskStatus + "）");
+            }
+
             final String action = "audio/speech";
             String endpoint = ensureTrailing(p.getBaseUrl()) + action;
             endpoint = dedupSuffix(endpoint, "/" + action);
@@ -150,7 +265,7 @@ public class MediaService {
             HttpResponse<byte[]> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofByteArray());
             if (resp.statusCode() != 200) {
                 String textResp = new String(resp.body(), StandardCharsets.UTF_8);
-                return httpFail("AUDIO_TTS", resp.statusCode(), textResp);
+                return httpFail("AUDIO_TTS", resp.statusCode(), textResp, vendor);
             }
             byte[] bytes = resp.body();
             String mime = mimeForAudio(StringUtils.hasText(format) ? format : "mp3");
@@ -172,12 +287,49 @@ public class MediaService {
         Optional<ApiProfile> opt = apiProfileService.getActivePlain(ApiProfileType.AUDIO);
         if (opt.isEmpty() || !StringUtils.hasText(opt.get().getApiKey())) {
             return MediaResponse.error("AUDIO_ASR",
-                    "⚠️ 未配置「语音模型」，请先到「设置 → 语音模型」填 Key（ASR 使用 whisper-1 系列模型）。");
+                    "⚠️ 未配置「语音模型」，请先到「设置 → 语音模型」填 Key（ASR 使用 whisper-1 或 paraformer-v2 系列模型）。");
         }
         ApiProfile p = opt.get();
         int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0
                 ? p.getTimeoutSeconds() : DEFAULT_TIMEOUT_AUDIO;
+        final ProviderVendor vendor = vendorOf(p);
         try {
+            // —— Dashscope（Paraformer/SeACosformer）原生分支 ——
+            if (vendor == ProviderVendor.DASHSCOPE) {
+                final String endpoint = DASHSCOPE_ROOT + "api/v1/services/aigc/asr/transcription";
+                String model = orModel(p.getModel(), "paraformer-v2");
+                // Dashscope 原生 ASR：POST 统一 JSON {model, input:{file_url|file_stream}, parameters:{format, hotwords}}
+                // 这里把本地音频先 POST 成 multipart with named parts，按 Dashscope HTTP 文档以 file_stream + model + parameters JSON multipart mixed 提交
+                var mb = new org.springframework.http.client.MultipartBodyBuilder();
+                mb.part("model", model);
+                mb.part("file", file.getResource());
+                var params = objectMapper.createObjectNode();
+                String guessExt = guessFileExtension(file.getOriginalFilename());
+                if (guessExt != null) params.put("format", guessExt.replace(".", ""));
+                mb.part("parameters", objectMapper.writeValueAsString(params), org.springframework.http.MediaType.APPLICATION_JSON);
+                try {
+                    String text = restClient.post().uri(endpoint)
+                            .header("Authorization", "Bearer " + p.getApiKey())
+                            .header("X-DashScope-Async", "enable")
+                            .contentType(MediaType.MULTIPART_FORM_DATA)
+                            .body(mb.build())
+                            .retrieve()
+                            .body(String.class);
+                    JsonNode root = objectMapper.readTree(text);
+                    StringBuilder sb = new StringBuilder();
+                    JsonNode outs = root.path("output");
+                    if (outs.has("sentences")) for (JsonNode s : outs.path("sentences")) sb.append(s.path("text").asText(""));
+                    if (sb.isEmpty()) {
+                        String single = outs.path("text").asText("");
+                        if (single.isBlank()) single = root.path("message").asText("");
+                        sb.append(single);
+                    }
+                    return MediaResponse.asr(sb.toString().trim());
+                } catch (org.springframework.web.client.HttpStatusCodeException ex) {
+                    return httpFail("AUDIO_ASR", ex.getStatusCode().value(), ex.getResponseBodyAsString(), vendor);
+                }
+            }
+
             final String action = "audio/transcriptions";
             String endpoint = ensureTrailing(p.getBaseUrl()) + action;
             endpoint = dedupSuffix(endpoint, "/" + action);
@@ -198,7 +350,7 @@ public class MediaService {
             if (!StringUtils.hasText(t)) t = text.trim();
             return MediaResponse.asr(t);
         } catch (org.springframework.web.client.HttpStatusCodeException ex) {
-            return httpFail("AUDIO_ASR", ex.getStatusCode().value(), ex.getResponseBodyAsString());
+            return httpFail("AUDIO_ASR", ex.getStatusCode().value(), ex.getResponseBodyAsString(), vendor);
         } catch (Exception e) {
             return MediaResponse.error("AUDIO_ASR", friendlyErr("语音转写", e));
         }
@@ -323,6 +475,25 @@ public class MediaService {
         };
     }
 
+    /**
+     * Dashscope 万相生图 size：把 OpenAI 约定的 "WxH" 格式（1024x1024）转换成
+     * 万相原生参数需要的 "W*H"；其余常见尺寸按文档支持直接透传。
+     */
+    private static String dashscopeImageSize(String size) {
+        String s = size == null ? "1024x1024" : size.trim().toLowerCase();
+        // 万相原生支持：1024*1024, 720*1280, 1280*720, 768*768, 512*512 …
+        return s.replace("x", "*");
+    }
+
+    /** Dashscope TTS/ASR format：把 OpenAI 兼容名（mp3/wav/aac/flac/opus）对齐到原生支持值 */
+    private static String dashscopeAudioFormat(String format) {
+        String f = format == null ? "mp3" : format.trim().toLowerCase();
+        return switch (f) {
+            case "wav", "pcm", "aac", "flac", "opus" -> f;
+            default -> "mp3";
+        };
+    }
+
     // ===================================== 内部辅助 =====================================
 
     /** 关键：先 sanitize 再拼尾部 / — 彻底搞定 Markdown 包络字符（用户截图里 > `https://…` 这种脏数据） */
@@ -349,6 +520,38 @@ public class MediaService {
 
     private static String orModel(String m, String fallback) {
         return StringUtils.hasText(m) ? m : fallback;
+    }
+
+    /** 通用空值兜底：s 为空则返回 fallback */
+    private static String or(String s, String fallback) {
+        return StringUtils.hasText(s) ? s : fallback;
+    }
+
+    /**
+     * 从 Dashscope 原生异步响应的 output.results 数组抽取 MediaItem 列表。
+     * 图结果元素格式：{url: "...", b64_image: "..."}；视频则是 {url: "..."}。
+     */
+    private static List<MediaResponse.MediaItem> collectDashscopeResults(JsonNode results) {
+        List<MediaResponse.MediaItem> items = new ArrayList<>();
+        if (results == null || !results.isArray()) return items;
+        for (JsonNode r : results) {
+            String url = r.path("url").asText(null);
+            String b64 = r.path("b64_image").asText(null);
+            if (!StringUtils.hasText(b64)) b64 = r.path("b64_json").asText(null);
+            String rp = r.path("revised_prompt").asText(null);
+            if (StringUtils.hasText(url) || StringUtils.hasText(b64)) {
+                items.add(new MediaResponse.MediaItem(url, b64, rp));
+            }
+        }
+        return items;
+    }
+
+    /** 取文件名后缀（包含点），例如 "speech.mp3" → ".mp3"；无法判断返回 null */
+    private static String guessFileExtension(String filename) {
+        if (!StringUtils.hasText(filename)) return null;
+        int idx = filename.lastIndexOf('.');
+        if (idx < 0 || idx == filename.length() - 1) return null;
+        return filename.substring(idx);
     }
 
     /**
@@ -398,21 +601,45 @@ public class MediaService {
     }
 
     private MediaResponse httpFail(String kind, int code, String body) {
+        return httpFail(kind, code, body, null);
+    }
+
+    /**
+     * HTTP 失败统一处理（带厂商上下文）：
+     *   - 对 Dashscope + 404 明确提示"兼容模式仅 chat/embeddings，生图/TTS/ASR/视频必须走原生接口"
+     *   - 其余错误沿用通用文案
+     */
+    private MediaResponse httpFail(String kind, int code, String body, ProviderVendor vendor) {
         String msg;
         try {
             JsonNode err = objectMapper.readTree(body).path("error");
             String m = err.path("message").asText(null);
+            if (!StringUtils.hasText(m)) {
+                JsonNode codeNode = objectMapper.readTree(body).path("code");
+                JsonNode msgNode  = objectMapper.readTree(body).path("message");
+                if (codeNode != null && msgNode != null && StringUtils.hasText(msgNode.asText(null))) {
+                    m = "code=" + codeNode.asText("") + " / message=" + msgNode.asText("");
+                }
+            }
             if (!StringUtils.hasText(m)) m = err.isTextual() ? err.asText() : null;
             msg = StringUtils.hasText(m) ? m : body;
-            if (msg.length() > 280) msg = msg.substring(0, 280) + "…";
+            if (msg.length() > 320) msg = msg.substring(0, 320) + "…";
         } catch (Exception ignore) { msg = body; }
-        String friendly = switch (code) {
-            case 401 -> "❌ API Key 无效或未授权，请检查 Key 是否填写正确（HTTP 401）。";
-            case 403 -> "❌ 账户被拒访问该模型，或配额耗尽（HTTP 403）：" + msg;
-            case 404 -> "❌ 模型 ID 或厂商地址有误，请核对预设模型或自定义 baseUrl（HTTP 404）。";
-            case 429 -> "❌ 请求过于频繁或额度不足，稍后再试（HTTP 429）：" + msg;
-            default -> "❌ 接口调用失败（HTTP " + code + "）：" + msg;
-        };
+        String friendly;
+        if (code == 404 && vendor == ProviderVendor.DASHSCOPE) {
+            // Dashscope 404 99% 是用户误用 compatible-mode/v1/images /audio /video 兼容接口造成
+            friendly = "❌ 检测到万相/通义原生接口返回 404：请确认模型 ID 属于当前模态（图/TTS/ASR/视频模型不能混用），" +
+                    "并确保未在 baseUrl 中手动拼接 /v1/images 之类路径。" +
+                    "系统已强制走原生 /api/v1/services/aigc/* 接口（HTTP 404，详情：" + msg + "）。";
+        } else {
+            friendly = switch (code) {
+                case 401 -> "❌ API Key 无效或未授权，请检查 Key 是否填写正确（HTTP 401）。";
+                case 403 -> "❌ 账户被拒访问该模型，或配额耗尽（HTTP 403）：" + msg;
+                case 404 -> "❌ 模型 ID 或厂商地址有误，请核对预设模型或自定义 baseUrl（HTTP 404）。";
+                case 429 -> "❌ 请求过于频繁或额度不足，稍后再试（HTTP 429）：" + msg;
+                default -> "❌ 接口调用失败（HTTP " + code + "）：" + msg;
+            };
+        }
         return MediaResponse.error(kind, friendly);
     }
 
