@@ -110,3 +110,20 @@ export const getProviders = () => json(`${BASE}/config/providers`)
 export const getWeatherConfig = () => json(`${BASE}/config/weather`)
 export const saveWeatherConfig = (dto) =>
   json(`${BASE}/config/weather`, { method: 'POST', body: JSON.stringify(dto) })
+
+// === 多套 API 配置（/api/config/profiles 家族） ===
+export const listApiProfiles = (type) => json(`${BASE}/config/profiles?type=${type}`)
+export const getActiveApiProfile = (type) =>
+  fetch(`${BASE}/config/profiles/active?type=${type}`).then(r => r.status === 204 ? null : r.json())
+export const getApiProfile = (id) => json(`${BASE}/config/profiles/${id}`)
+export const createApiProfile = (payload) =>
+  json(`${BASE}/config/profiles`, { method: 'POST', body: JSON.stringify(payload) })
+export const updateApiProfile = (id, payload) =>
+  json(`${BASE}/config/profiles/${id}`, { method: 'PUT', body: JSON.stringify(payload) })
+export const activateApiProfile = (id) =>
+  json(`${BASE}/config/profiles/${id}/activate`, { method: 'POST', body: '{}' })
+export const deleteApiProfile = (id) =>
+  json(`${BASE}/config/profiles/${id}`, { method: 'DELETE' })
+
+// === 我的：任务历史 ===
+export const getMineHistory = () => json(`${BASE}/tasks/mine`)

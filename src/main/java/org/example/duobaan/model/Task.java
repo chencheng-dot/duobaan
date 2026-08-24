@@ -10,12 +10,22 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.SQLDelete;
+import org.hibernate.annotations.SQLRestriction;
 
 /**
  * 流程表条目：今日/明日分组，状态流转，可上交。
+ *
+ * 软删除策略（工作留痕）：
+ * - 调用 Repository.deleteById() 时，Hibernate 执行 @SQLDelete 自定义 SQL
+ *   （UPDATE SET deleted=1, deleted_at=NOW()），不会物理删除行。
+ * - 正常列表/查询通过 @SQLRestriction 自动过滤掉 deleted=1 的行，
+ *   只有专门的"历史查询"接口会绕过此过滤（使用 nativeQuery 的新 Repository）。
  */
 @Entity
 @Table(name = "task")
+@SQLRestriction("deleted = 0")
+@SQLDelete(sql = "UPDATE task SET deleted = 1, deleted_at = NOW(6) WHERE id = ?")
 public class Task {
 
     @Id
@@ -47,6 +57,18 @@ public class Task {
 
     @Column(nullable = false)
     private LocalDateTime createdAt = LocalDateTime.now();
+
+    /** 上交时间：任务被标记为 SUBMITTED 时写入，用于"我已上交"工作留痕排序 */
+    @Column(name = "submitted_at")
+    private LocalDateTime submittedAt;
+
+    /** 软删除标记：0=正常，1=已删除。默认 0，实体查询自动过滤 deleted=1 */
+    @Column(columnDefinition = "TINYINT(1) DEFAULT 0")
+    private Boolean deleted = false;
+
+    /** 软删除时间：deleted=1 时写入，用于"已删除"列表按删除时间倒序 */
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
 
     public Task() {
     }
@@ -127,5 +149,29 @@ public class Task {
 
     public void setCreatedAt(LocalDateTime createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public LocalDateTime getSubmittedAt() {
+        return submittedAt;
+    }
+
+    public void setSubmittedAt(LocalDateTime submittedAt) {
+        this.submittedAt = submittedAt;
+    }
+
+    public Boolean getDeleted() {
+        return deleted;
+    }
+
+    public void setDeleted(Boolean deleted) {
+        this.deleted = deleted;
+    }
+
+    public LocalDateTime getDeletedAt() {
+        return deletedAt;
+    }
+
+    public void setDeletedAt(LocalDateTime deletedAt) {
+        this.deletedAt = deletedAt;
     }
 }

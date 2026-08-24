@@ -42,6 +42,20 @@ function go(name) {
       <span class="lbl">多巴胺</span>
     </button>
 
+    <button
+      class="mode-btn"
+      :class="{ active: current === 'mine' }"
+      @click="go('mine')"
+      title="我的"
+    >
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"
+        fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+        <circle cx="12" cy="7" r="4"/>
+      </svg>
+      <span class="lbl">我的</span>
+    </button>
+
     <div class="spacer"></div>
 
     <button

@@ -45,3 +45,6 @@ src/main/resources/static/vite.svg
 ### 本地数据/日志 ###
 data/
 *.log
+
+### TRAE IDE 临时文件 ###
+.trae/

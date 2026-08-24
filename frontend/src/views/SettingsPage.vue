@@ -1,48 +1,68 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import {
   getLlmConfig, saveLlmConfig, getProviders,
-  getWeatherConfig, saveWeatherConfig
+  getWeatherConfig, saveWeatherConfig,
+  listApiProfiles, createApiProfile, updateApiProfile, activateApiProfile, deleteApiProfile
 } from '../api'
 
 const tab = ref('llm') // 'llm' | 'weather'
 
 // --- 大模型 ---
 const providers = ref([])
-const llmCfg = ref({ provider: 'CHATGPT', baseUrl: '', apiKey: '', model: '', timeoutSeconds: 30 })
+const llmCfg = ref({ name: '', provider: 'CHATGPT', baseUrl: '', apiKey: '', model: '', timeoutSeconds: 30 })
 const llmSaving = ref(false)
 const llmSaved = ref(false)
+const llmProfiles = ref([])
+const editingLlmId = ref(null)
 
 // --- 天气 ---
-const weatherCfg = ref({ provider: 'qweather', apiHost: '', apiKey: '', location: '北京', cacheTtlSeconds: 600 })
+const weatherCfg = ref({ name: '', provider: 'qweather', apiHost: '', apiKey: '', location: '北京', cacheTtlSeconds: 600 })
 const weatherSaving = ref(false)
 const weatherSaved = ref(false)
+const weatherProfiles = ref([])
+const editingWeatherId = ref(null)
 
 const loading = ref(true)
 const errorMsg = ref('')
 
-async function load() {
+// 删除确认弹窗（通用）
+const delConfirm = ref({ open: false, scope: null, id: null, name: '' })
+
+async function loadAll() {
   try {
     loading.value = true
-    const [llm, provs, wth] = await Promise.all([
-      getLlmConfig(), getProviders(), getWeatherConfig()
+    const [llm, provs, wth, llmList, weatherList] = await Promise.all([
+      getLlmConfig(), getProviders(), getWeatherConfig(),
+      listApiProfiles('LLM').catch(() => []),
+      listApiProfiles('WEATHER').catch(() => [])
     ])
     llmCfg.value = {
+      name: '',
       provider: llm.provider || 'CHATGPT',
       baseUrl: llm.baseUrl || '',
-      apiKey: llm.apiKey || '',
+      // 注意：list/get 返回的 apiKey 永远是打码的或空（后端 mask），这里 GET /config/llm 返回的也是打码。所以永远不清空用户输入
+      apiKey: '',
       model: llm.model || '',
       timeoutSeconds: llm.timeoutSeconds || 30
     }
     providers.value = provs
     if (!llmCfg.value.baseUrl) applyPreset('CHATGPT')
     weatherCfg.value = {
+      name: '',
       provider: wth.provider || 'qweather',
       apiHost: wth.apiHost || '',
-      apiKey: wth.apiKey || '',
+      apiKey: '',
       location: wth.location || '北京',
       cacheTtlSeconds: wth.cacheTtlSeconds || 600
     }
+    llmProfiles.value = llmList
+    weatherProfiles.value = weatherList
+    // 若 active=1 存在，自动把 active 那条的字段回填到表单（apiKey 仍然留空占位）
+    const activeLlm = llmList.find(p => p.isActive)
+    if (activeLlm) applyLlmProfile(activeLlm, false)
+    const activeWth = weatherList.find(p => p.isActive)
+    if (activeWth) applyWeatherProfile(activeWth, false)
   } catch (e) {
     errorMsg.value = '加载配置失败：' + e.message
   } finally {
@@ -57,12 +77,70 @@ function applyPreset(code) {
     if (preset.baseUrl) llmCfg.value.baseUrl = preset.baseUrl
     if (preset.defaultModel) llmCfg.value.model = preset.defaultModel
   }
+  llmSaved.value = false
+  editingLlmId.value = null
 }
 
+function applyLlmProfile(p, includeMarkedActive = true) {
+  editingLlmId.value = includeMarkedActive ? p.id : null
+  llmCfg.value = {
+    name: p.name || '',
+    provider: p.provider || 'CHATGPT',
+    baseUrl: p.baseUrl || '',
+    apiKey: '',            // 后端永远不回传明文，改 Key 请用户手动粘贴
+    model: p.model || '',
+    timeoutSeconds: p.timeoutSeconds || 30
+  }
+  llmSaved.value = false
+  // 切换预设卡片高亮
+  if (!providers.value.find(q => q.code === llmCfg.value.provider)) {
+    // 没匹配到预设就归为 CUSTOM（但 provider 仍保留原值）
+  }
+}
+
+function applyWeatherProfile(p, includeMarkedActive = true) {
+  editingWeatherId.value = includeMarkedActive ? p.id : null
+  weatherCfg.value = {
+    name: p.name || '',
+    provider: p.provider || 'qweather',
+    apiHost: p.baseUrl || '',
+    apiKey: '',
+    location: p.location || '北京',
+    cacheTtlSeconds: p.cacheTtlSeconds || 600
+  }
+  weatherSaved.value = false
+}
+
+// ============= LLM 保存：editingLlmId 存在则 UPDATE，否则 CREATE =============
 async function saveLlm() {
   try {
     llmSaving.value = true; llmSaved.value = false
-    await saveLlmConfig(llmCfg.value)
+    const payload = {
+      profileType: 'LLM',
+      name: (llmCfg.value.name || '').trim() || '未命名大模型',
+      provider: llmCfg.value.provider,
+      baseUrl: llmCfg.value.baseUrl,
+      model: llmCfg.value.model,
+      apiKey: llmCfg.value.apiKey || '',   // 为空在后端 create 会失败，update 时表示不换
+      location: null,
+      cacheTtlSeconds: null,
+      timeoutSeconds: llmCfg.value.timeoutSeconds,
+      setActive: true   // 保存并立即设为默认（符合用户"保存了即用"的直觉）
+    }
+    let created
+    if (editingLlmId.value) {
+      created = await updateApiProfile(editingLlmId.value, payload)
+    } else {
+      if (!payload.apiKey) throw new Error('新建配置请填写 API Key（编辑模式下留空可保留原 Key）')
+      created = await createApiProfile(payload)
+    }
+    llmCfg.value.name = created.name
+    // 如果用户没填 Key（编辑时），把打码显示回 form 上的 Key 输入框里视觉占位
+    if (!llmCfg.value.apiKey) llmCfg.value.apiKey = created.apiKeyMasked
+    llmProfiles.value = await listApiProfiles('LLM')
+    const reloaded = llmProfiles.value.find(q => q.id === created.id)
+    if (reloaded) editingLlmId.value = reloaded.id
+    // 激活成功 → Tab 上绿点闪烁
     llmSaved.value = true
     setTimeout(() => { llmSaved.value = false }, 2500)
   } catch (e) {
@@ -72,10 +150,36 @@ async function saveLlm() {
   }
 }
 
+// ============= Weather 保存 =============
 async function saveWeather() {
   try {
     weatherSaving.value = true; weatherSaved.value = false
-    await saveWeatherConfig(weatherCfg.value)
+    const payload = {
+      profileType: 'WEATHER',
+      name: (weatherCfg.value.name || '').trim() || '未命名天气',
+      provider: 'qweather',
+      baseUrl: weatherCfg.value.apiHost,
+      model: null,
+      apiKey: weatherCfg.value.apiKey || '',
+      location: weatherCfg.value.location || '北京',
+      cacheTtlSeconds: weatherCfg.value.cacheTtlSeconds || 600,
+      timeoutSeconds: null,
+      setActive: true
+    }
+    let created
+    if (editingWeatherId.value) {
+      created = await updateApiProfile(editingWeatherId.value, payload)
+    } else {
+      if (!payload.apiKey) throw new Error('新建天气配置请填写 API Key（编辑模式下留空可保留原 Key）')
+      created = await createApiProfile(payload)
+    }
+    weatherCfg.value.name = created.name
+    if (!weatherCfg.value.apiKey) weatherCfg.value.apiKey = created.apiKeyMasked
+    weatherProfiles.value = await listApiProfiles('WEATHER')
+    const reloaded = weatherProfiles.value.find(q => q.id === created.id)
+    if (reloaded) editingWeatherId.value = reloaded.id
+    // 通知 TopBar 天气立即刷新
+    try { window.dispatchEvent(new CustomEvent('weather:forceRefresh')) } catch (_) {}
     weatherSaved.value = true
     setTimeout(() => { weatherSaved.value = false }, 2500)
   } catch (e) {
@@ -85,10 +189,66 @@ async function saveWeather() {
   }
 }
 
-const llmReady = computed(() => llmCfg.value.apiKey && llmCfg.value.apiKey.length > 0)
-const weatherReady = computed(() => weatherCfg.value.apiKey && weatherCfg.value.apiKey.length > 0)
+// ============= Activate =============
+async function activateLlm(id) {
+  try {
+    await activateApiProfile(id)
+    llmProfiles.value = await listApiProfiles('LLM')
+    const p = llmProfiles.value.find(q => q.id === id)
+    if (p) applyLlmProfile(p, true)
+    llmSaved.value = true
+    setTimeout(() => { llmSaved.value = false }, 1800)
+  } catch (e) { errorMsg.value = '激活失败：' + e.message }
+}
+async function activateWeather(id) {
+  try {
+    await activateApiProfile(id)
+    weatherProfiles.value = await listApiProfiles('WEATHER')
+    const p = weatherProfiles.value.find(q => q.id === id)
+    if (p) applyWeatherProfile(p, true)
+    try { window.dispatchEvent(new CustomEvent('weather:forceRefresh')) } catch (_) {}
+    weatherSaved.value = true
+    setTimeout(() => { weatherSaved.value = false }, 1800)
+  } catch (e) { errorMsg.value = '激活失败：' + e.message }
+}
 
-onMounted(load)
+// ============= Delete（含二次确认） =============
+function askDelete(scope, p) {
+  delConfirm.value = { open: true, scope, id: p.id, name: p.name }
+}
+function cancelDelete() { delConfirm.value = { open: false, scope: null, id: null, name: '' } }
+async function confirmDelete() {
+  const { scope, id } = delConfirm.value
+  if (!id) return
+  try {
+    if (scope === 'llm') {
+      await deleteApiProfile(id)
+      llmProfiles.value = await listApiProfiles('LLM')
+      // 如果删除的正在编辑 → 清空 editing & name
+      if (editingLlmId.value === id) {
+        editingLlmId.value = null
+        llmCfg.value.name = ''
+      }
+    } else {
+      await deleteApiProfile(id)
+      weatherProfiles.value = await listApiProfiles('WEATHER')
+      if (editingWeatherId.value === id) {
+        editingWeatherId.value = null
+        weatherCfg.value.name = ''
+      }
+    }
+    cancelDelete()
+  } catch (e) {
+    errorMsg.value = '删除失败：' + e.message
+  }
+}
+
+const llmReady = computed(() => llmProfiles.value.some(p => p.isActive))
+const weatherReady = computed(() => weatherProfiles.value.some(p => p.isActive))
+
+watch(errorMsg, (v) => { if (v) setTimeout(() => { errorMsg.value = '' }, 5000) })
+
+onMounted(loadAll)
 </script>
 
 <template>
@@ -168,6 +328,40 @@ onMounted(load)
         </button>
         <div v-if="llmSaved" class="save-success">配置已保存</div>
       </div>
+
+      <!-- 已保存的大模型配置列表 -->
+      <section class="info-card" v-if="llmProfiles.length">
+        <h2 class="card-title">已保存的大模型配置（{{ llmProfiles.length }}）</h2>
+        <div class="profile-list">
+          <div
+            v-for="p in llmProfiles"
+            :key="p.id"
+            class="profile-card"
+            :class="{ active: p.isActive, editing: editingLlmId === p.id }"
+          >
+            <div class="profile-head">
+              <div class="profile-name">
+                <span class="pname">{{ p.name }}</span>
+                <span v-if="p.isActive" class="badge badge-active">使用中</span>
+                <span v-if="editingLlmId === p.id" class="badge badge-edit">编辑中</span>
+              </div>
+              <div class="profile-actions">
+                <button v-if="!p.isActive" class="mini-btn" @click="activateLlm(p.id)">设为默认</button>
+                <button class="mini-btn" @click="applyLlmProfile(p, true)">编辑</button>
+                <button class="mini-btn danger" @click="askDelete('llm', p)">删除</button>
+              </div>
+            </div>
+            <div class="profile-body">
+              <div class="profile-meta"><span class="k">提供商</span><span class="v">{{ p.provider || '—' }}</span></div>
+              <div class="profile-meta"><span class="k">Base URL</span><span class="v mono">{{ p.baseUrl || '—' }}</span></div>
+              <div class="profile-meta"><span class="k">模型</span><span class="v mono">{{ p.model || '—' }}</span></div>
+              <div class="profile-meta"><span class="k">Key</span><span class="v mono muted">{{ p.apiKeyMasked }}</span></div>
+              <div class="profile-meta"><span class="k">超时</span><span class="v">{{ p.timeoutSeconds ? p.timeoutSeconds + ' 秒' : '—' }}</span></div>
+              <div class="profile-meta"><span class="k">更新</span><span class="v muted">{{ p.updatedAt }}</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <section class="info-card">
         <h2 class="card-title">提供商说明</h2>
@@ -260,6 +454,39 @@ onMounted(load)
         <div v-if="weatherSaved" class="save-success">配置已保存，下次刷新即生效</div>
       </div>
 
+      <!-- 已保存的天气配置列表 -->
+      <section class="info-card" v-if="weatherProfiles.length">
+        <h2 class="card-title">已保存的天气配置（{{ weatherProfiles.length }}）</h2>
+        <div class="profile-list">
+          <div
+            v-for="p in weatherProfiles"
+            :key="p.id"
+            class="profile-card"
+            :class="{ active: p.isActive, editing: editingWeatherId === p.id }"
+          >
+            <div class="profile-head">
+              <div class="profile-name">
+                <span class="pname">{{ p.name }}</span>
+                <span v-if="p.isActive" class="badge badge-active">使用中</span>
+                <span v-if="editingWeatherId === p.id" class="badge badge-edit">编辑中</span>
+              </div>
+              <div class="profile-actions">
+                <button v-if="!p.isActive" class="mini-btn" @click="activateWeather(p.id)">设为默认</button>
+                <button class="mini-btn" @click="applyWeatherProfile(p, true)">编辑</button>
+                <button class="mini-btn danger" @click="askDelete('weather', p)">删除</button>
+              </div>
+            </div>
+            <div class="profile-body">
+              <div class="profile-meta"><span class="k">API Host</span><span class="v mono">{{ p.baseUrl || '—' }}</span></div>
+              <div class="profile-meta"><span class="k">Key</span><span class="v mono muted">{{ p.apiKeyMasked }}</span></div>
+              <div class="profile-meta"><span class="k">城市</span><span class="v">{{ p.location || '—' }}</span></div>
+              <div class="profile-meta"><span class="k">缓存</span><span class="v">{{ p.cacheTtlSeconds ? p.cacheTtlSeconds + ' 秒' : '—' }}</span></div>
+              <div class="profile-meta"><span class="k">更新</span><span class="v muted">{{ p.updatedAt }}</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="info-card">
         <h2 class="card-title">使用说明</h2>
         <div class="info-list">
@@ -272,6 +499,23 @@ onMounted(load)
     </template>
 
     <div v-if="errorMsg" class="save-error" style="text-align:center">{{ errorMsg }}</div>
+
+    <!-- 删除确认遮罩 -->
+    <Teleport to="body">
+      <div v-if="delConfirm.open" class="modal-mask" @click.self="cancelDelete">
+        <div class="modal">
+          <h3 class="modal-title">确认删除？</h3>
+          <p class="modal-body">
+            即将删除配置 <code>{{ delConfirm.name }}</code>。
+            <br/><strong>删除后数据行将从数据库物理移除，API Key 不留残片，无法恢复。</strong>
+          </p>
+          <div class="modal-actions">
+            <button class="btn-ghost" @click="cancelDelete">取消</button>
+            <button class="btn-danger" @click="confirmDelete">确认删除</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -490,4 +734,187 @@ onMounted(load)
   border-radius: var(--radius);
   background: #FFFFFF;
 }
+
+/* ===== 多套配置列表卡片 ===== */
+.profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.profile-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #FAFAFA;
+  padding: 14px;
+  transition: all 0.12s;
+}
+.profile-card.active {
+  border-color: var(--success);
+  background: #f2fbf4;
+  box-shadow: inset 0 0 0 1px var(--success);
+}
+.profile-card.editing {
+  border-color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--text);
+}
+.profile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.profile-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pname {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.8;
+  border: 1px solid var(--border);
+}
+.badge-active {
+  color: #1f7a3d;
+  border-color: #cde7d4;
+  background: #eef9f1;
+}
+.badge-edit {
+  color: #555;
+  border-color: #ddd;
+  background: #f0f0f0;
+}
+.profile-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.mini-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.mini-btn:hover { border-color: var(--text); }
+.mini-btn.danger {
+  color: #b91c1c;
+  border-color: #f5cfc0;
+  background: #FFF5F0;
+}
+.mini-btn.danger:hover {
+  background: #FEE5D9;
+  border-color: #b91c1c;
+}
+.profile-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 16px;
+}
+.profile-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12.5px;
+  line-height: 1.8;
+}
+.profile-meta .k {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  margin-right: 8px;
+}
+.profile-meta .v {
+  color: var(--text);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+.profile-meta .v.muted { color: var(--text-muted); }
+.profile-meta .v.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11.5px;
+}
+
+/* ===== 删除确认 Modal ===== */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.modal {
+  width: 420px;
+  max-width: 92vw;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px 24px 18px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+}
+.modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 10px 0;
+}
+.modal-body {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  margin: 0 0 18px 0;
+}
+.modal-body code {
+  background: #F9FAFB;
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  color: var(--text);
+}
+.modal-body strong { color: #b91c1c; }
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.btn-ghost {
+  padding: 7px 16px;
+  font-size: 13px;
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.btn-ghost:hover { border-color: var(--text); }
+.btn-danger {
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  background: #b91c1c;
+  border: 1px solid #b91c1c;
+  border-radius: 8px;
+  color: #FFFFFF;
+  cursor: pointer;
+  transition: opacity 0.12s;
+}
+.btn-danger:hover { opacity: 0.9; }
 </style>

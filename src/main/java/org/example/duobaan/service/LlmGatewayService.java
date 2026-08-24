@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.function.Consumer;
 
 import org.example.duobaan.config.DuobaanProperties;
+import org.example.duobaan.model.ApiProfileType;
 import org.example.duobaan.model.ChatMode;
 import org.example.duobaan.model.TaskGroup;
 import org.example.duobaan.model.dto.ChatResponse;
@@ -41,19 +42,29 @@ public class LlmGatewayService {
     private final ObjectMapper objectMapper;
     private final DuobaanProperties props;
     private final ConfigService configService;
+    private final ApiProfileService apiProfileService;
 
     public LlmGatewayService(RestClient externalRestClient, HttpClient httpClient,
-            ObjectMapper objectMapper, DuobaanProperties props, ConfigService configService) {
+                             ObjectMapper objectMapper, DuobaanProperties props,
+                             ConfigService configService, ApiProfileService apiProfileService) {
         this.restClient = externalRestClient;
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
         this.props = props;
         this.configService = configService;
+        this.apiProfileService = apiProfileService;
     }
 
-    /** 取当前生效的大模型配置（运行时可修改） */
+    /** 取当前生效的大模型配置：优先从 api_profile.active 读，否则回退 system_config/properties 默认值 */
     private LlmConfigDTO currentConfig() {
-        return configService.getLlmConfig();
+        return apiProfileService.getActivePlain(ApiProfileType.LLM)
+                .map(p -> new LlmConfigDTO(
+                        p.getProvider() == null ? "custom" : p.getProvider(),
+                        p.getBaseUrl(),
+                        p.getApiKey(),
+                        p.getModel(),
+                        p.getTimeoutSeconds() == null ? props.getLlm().getTimeoutSeconds() : p.getTimeoutSeconds()))
+                .orElseGet(configService::getLlmConfig);
     }
 
     private boolean isConfigured(LlmConfigDTO cfg) {

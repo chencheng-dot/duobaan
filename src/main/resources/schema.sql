@@ -5,7 +5,7 @@
 -- Hibernate ddl-auto=none，禁止 Hibernate 干预表结构
 -- ============================================================
 
--- 流程表条目：今日/明日分组，状态流转，可上交
+-- 流程表条目：今日/明日分组，状态流转，可上交；软删除用于工作留痕
 CREATE TABLE IF NOT EXISTS `task` (
     `id`                BIGINT       NOT NULL AUTO_INCREMENT,
     `title`             VARCHAR(200) NOT NULL,
@@ -16,7 +16,33 @@ CREATE TABLE IF NOT EXISTS `task` (
     `estimated_minutes` INT,
     `due_at`            DATETIME(6),
     `created_at`        DATETIME(6)   NOT NULL,
-    PRIMARY KEY (`id`)
+    `submitted_at`      DATETIME(6)   NULL COMMENT '上交时间：任务被标记为 SUBMITTED 时写入',
+    `deleted`           TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '软删除标记：0=正常 1=已删除',
+    `deleted_at`        DATETIME(6)   NULL COMMENT '软删除时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_task_status_deleted` (`task_status`, `deleted`),
+    KEY `idx_task_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 多套 API 配置持久化：大模型 & 天气服务共用一张表
+-- 安全设计：删除 = 物理 DELETE 行，防止 API Key 残留在数据库
+CREATE TABLE IF NOT EXISTS `api_profile` (
+    `id`                  BIGINT       NOT NULL AUTO_INCREMENT,
+    `profile_type`        ENUM('LLM','WEATHER') NOT NULL,
+    `name`                VARCHAR(100) NOT NULL,
+    `provider`            VARCHAR(50)  NULL,
+    `base_url`            VARCHAR(500) NULL,
+    `model`               VARCHAR(100) NULL,
+    `api_key`             MEDIUMTEXT   NOT NULL,
+    `location`            VARCHAR(100) NULL,
+    `cache_ttl_seconds`   BIGINT       NULL,
+    `timeout_seconds`     INT          NULL,
+    `is_active`           TINYINT(1)   NOT NULL DEFAULT 0,
+    `created_at`          DATETIME(6)  NOT NULL,
+    `updated_at`          DATETIME(6)  NOT NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_api_profile_type_active` (`profile_type`, `is_active`),
+    KEY `idx_api_profile_type_updated` (`profile_type`, `updated_at` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 对话记录，区分办公/多巴胺模式
@@ -36,3 +62,6 @@ CREATE TABLE IF NOT EXISTS `system_config` (
     `updated_at` DATETIME(6)   NOT NULL,
     PRIMARY KEY (`cfg_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- 注意：已有数据库的 task 表补齐 submitted_at/deleted/deleted_at 列和索引
+-- 由 Java 启动迁移组件 SchemaMigrator 自动完成（见 config/SchemaMigrator.java），
+-- 使用 JdbcTemplate 查询 information_schema 判断后再 ALTER，避免 DELIMITER 兼容性问题。

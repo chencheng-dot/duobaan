@@ -1,5 +1,6 @@
 package org.example.duobaan.service;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -9,9 +10,11 @@ import org.example.duobaan.model.TaskCategory;
 import org.example.duobaan.model.TaskGroup;
 import org.example.duobaan.model.TaskSource;
 import org.example.duobaan.model.TaskStatus;
+import org.example.duobaan.model.dto.MineTasksResponse;
 import org.example.duobaan.model.dto.TaskPatch;
 import org.example.duobaan.model.dto.TaskRequest;
 import org.example.duobaan.model.dto.TaskSummary;
+import org.example.duobaan.repository.TaskHistoryRepository;
 import org.example.duobaan.repository.TaskRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -24,10 +27,14 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 public class TaskService {
 
-    private final TaskRepository repo;
+    private static final int HISTORY_LIMIT = 500;
 
-    public TaskService(TaskRepository repo) {
+    private final TaskRepository repo;
+    private final TaskHistoryRepository historyRepo;
+
+    public TaskService(TaskRepository repo, TaskHistoryRepository historyRepo) {
         this.repo = repo;
+        this.historyRepo = historyRepo;
     }
 
     public List<Task> list(TaskGroup group) {
@@ -106,9 +113,11 @@ public class TaskService {
         List<Task> today = repo.findByGroupOrderByCreatedAtAsc(TaskGroup.TODAY);
         List<Task> submitted = new ArrayList<>();
         List<Task> remaining = new ArrayList<>();
+        LocalDateTime now = LocalDateTime.now();
         for (Task t : today) {
             if (t.getStatus() == TaskStatus.DONE) {
                 t.setStatus(TaskStatus.SUBMITTED);
+                t.setSubmittedAt(now);
                 submitted.add(t);
             } else {
                 remaining.add(t);
@@ -158,5 +167,17 @@ public class TaskService {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * 「我的」Tab 三栏历史：已上交 / 已完成 / 已删除。
+     * 通过 historyRepo 原生 SQL 绕过 @SQLRestriction，能看到软删除的行。
+     */
+    public MineTasksResponse mineHistory() {
+        return new MineTasksResponse(
+                historyRepo.findSubmittedTasks(HISTORY_LIMIT),
+                historyRepo.findDoneTasks(HISTORY_LIMIT),
+                historyRepo.findDeletedTasks(HISTORY_LIMIT)
+        );
     }
 }

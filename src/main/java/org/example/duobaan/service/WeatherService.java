@@ -31,6 +31,7 @@ public class WeatherService {
     private final RestClient restClient;
     private final DuobaanProperties props;
     private final ConfigService configService;
+    private final ApiProfileService apiProfileService;
 
     private record Cache(WeatherNow weather, long fetchedAt) {
     }
@@ -42,19 +43,24 @@ public class WeatherService {
     private final AtomicReference<WeatherConfigDTO> lastCfg = new AtomicReference<>();
     private final AtomicReference<GeoEntry> geoCache = new AtomicReference<>();
 
-    public WeatherService(RestClient externalRestClient, DuobaanProperties props, ConfigService configService) {
+    public WeatherService(RestClient externalRestClient, DuobaanProperties props,
+                          ConfigService configService, ApiProfileService apiProfileService) {
         this.restClient = externalRestClient;
         this.props = props;
         this.configService = configService;
+        this.apiProfileService = apiProfileService;
     }
 
     private WeatherConfigDTO currentConfig() {
-        WeatherConfigDTO saved = configService.getWeatherConfig();
-        if (saved == null) {
-            DuobaanProperties.Weather w = props.getWeather();
-            return new WeatherConfigDTO(w.getProvider(), w.getApiHost(), w.getApiKey(), w.getLocation(), w.getCacheTtlSeconds());
-        }
-        return saved;
+        return apiProfileService.getActivePlain(org.example.duobaan.model.ApiProfileType.WEATHER)
+                .map(p -> new WeatherConfigDTO(
+                        p.getProvider() == null ? "qweather" : p.getProvider(),
+                        p.getBaseUrl() == null ? "" : p.getBaseUrl(),
+                        p.getApiKey(),
+                        p.getLocation() == null ? props.getWeather().getLocation() : p.getLocation(),
+                        p.getCacheTtlSeconds() == null || p.getCacheTtlSeconds() <= 0
+                                ? props.getWeather().getCacheTtlSeconds() : p.getCacheTtlSeconds()))
+                .orElseGet(configService::getWeatherConfig);
     }
 
     public WeatherNow now() {

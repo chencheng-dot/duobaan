@@ -5,6 +5,7 @@ import java.util.List;
 import org.example.duobaan.model.Task;
 import org.example.duobaan.model.TaskGroup;
 import org.example.duobaan.model.dto.BulkTaskRequest;
+import org.example.duobaan.model.dto.MineTasksResponse;
 import org.example.duobaan.model.dto.TaskPatch;
 import org.example.duobaan.model.dto.TaskRequest;
 import org.example.duobaan.model.dto.TaskSummary;
@@ -71,5 +72,16 @@ public class TaskController {
     @DeleteMapping("/{id}")
     public void delete(@PathVariable Long id) {
         taskService.delete(id);
+    }
+
+    /**
+     * 「我的」任务历史：已上交 / 已完成 / 已删除 三栏数据。
+     * - 已上交：status=SUBMITTED（今日上交小结 → 工作留痕）
+     * - 已完成：status=DONE 且未软删除
+     * - 已删除：deleted=1（软删除后保留用于工作留痕）
+     */
+    @GetMapping("/mine")
+    public MineTasksResponse mine() {
+        return taskService.mineHistory();
     }
 }
