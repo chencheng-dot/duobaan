@@ -186,8 +186,11 @@ onMounted(load)
         <h2 class="card-title">和风天气</h2>
         <div class="config-item">
           <label class="lbl">API Key <span class="required">*</span></label>
-          <input v-model="weatherCfg.apiKey" placeholder="访问 console.qweather.com 获取 Key" @input="weatherSaved = false" />
-          <p class="hint">免费订阅即可，用于实时天气与体感温度</p>
+          <input v-model="weatherCfg.apiKey" placeholder="访问 console.qweather.com 控制台创建凭据后粘贴" @input="weatherSaved = false" />
+          <p class="hint">
+            创建凭据时「身份认证方式」选择 <strong>API 密钥</strong>，「选择启用的 API」选择
+            <strong>指定 API</strong>，按下方清单勾选 3 个即可。
+          </p>
         </div>
         <div class="config-item">
           <label class="lbl">城市名 <span class="required">*</span></label>
@@ -201,6 +204,45 @@ onMounted(load)
         </div>
       </section>
 
+      <!-- 需要启用的 API 清单 -->
+      <section class="config-card">
+        <h2 class="card-title">需要启用的 API（3 个）</h2>
+        <p class="card-subtitle">
+          在「和风控制台 → 项目管理 → 凭据 → 编辑 → 指定 API」里勾选下面这 3 项（多勾选浪费额度，少勾选会调用失败）
+        </p>
+        <div class="api-list">
+          <div class="api-card">
+            <div class="api-head">
+              <span class="api-name">GeoAPI</span>
+              <span class="tag tag-free">免费</span>
+            </div>
+            <div class="api-desc"><strong>用途：</strong>中文城市名 → LocationID 解析</div>
+            <div class="api-path"><strong>接口：</strong><code>geoapi.qweather.com/v2/city/lookup</code></div>
+          </div>
+
+          <div class="api-card">
+            <div class="api-head">
+              <span class="api-name">天气预报</span>
+              <span class="tag tag-free">免费</span>
+            </div>
+            <div class="api-desc"><strong>用途：</strong>实时天气 + 体感温度（= 和风的"实况天气"）</div>
+            <div class="api-path"><strong>接口：</strong><code>devapi.qweather.com/v7/weather/now</code></div>
+          </div>
+
+          <div class="api-card">
+            <div class="api-head">
+              <span class="api-name">天气指数</span>
+              <span class="tag tag-free">免费</span><span class="tag tag-note">免费额度有限</span>
+            </div>
+            <div class="api-desc"><strong>用途：</strong>保留能力（穿衣/紫外线等生活指数，用于后续美食推荐与提示）</div>
+            <div class="api-path"><strong>接口：</strong><code>devapi.qweather.com/v7/indices/1d</code></div>
+          </div>
+        </div>
+        <p class="api-footnote">
+          其余 API（分钟降水、辐照、海洋、空气质量、热带气旋、时光机、天气预警、天文）为<strong>高级付费</strong>项目，本项目暂未使用，<strong>请勿勾选</strong>以节省配额。
+        </p>
+      </section>
+
       <div class="save-area">
         <button class="save-btn" @click="saveWeather" :disabled="weatherSaving">
           {{ weatherSaving ? '保存中…' : '保存天气配置' }}
@@ -211,10 +253,10 @@ onMounted(load)
       <section class="info-card">
         <h2 class="card-title">使用说明</h2>
         <div class="info-list">
-          <div class="info-item"><strong>1.</strong> 注册 <code>console.qweather.com</code> 账号</div>
-          <div class="info-item"><strong>2.</strong> 创建项目，复制"API Key"粘贴到上方</div>
-          <div class="info-item"><strong>3.</strong> 用"城市查询"接口找到你所在城市的 Location ID 填入</div>
-          <div class="info-item"><strong>4.</strong> 保存后回到首页，顶部即可看到实时天气与体感温度</div>
+          <div class="info-item"><strong>1.</strong> 打开 <code>console.qweather.com</code> 注册 / 登录账号</div>
+          <div class="info-item"><strong>2.</strong> 新建项目 → 「项目设置」里创建凭据，名称随便（如"天气1"）</div>
+          <div class="info-item"><strong>3.</strong> 身份认证方式选择 <strong>API 密钥</strong>，启用的 API 选择<strong>指定 API</strong>，勾选上方 3 项后保存</div>
+          <div class="info-item"><strong>4.</strong> 复制凭据的 Key 粘贴到本页"API Key"，填入城市名，保存后回到首页即可看到天气</div>
         </div>
       </section>
     </template>
@@ -363,5 +405,79 @@ onMounted(load)
   padding: 1px 6px;
   border-radius: 4px;
   font-size: 11px;
+}
+
+.card-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: -8px;
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+
+.api-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.api-card {
+  padding: 14px 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #FAFAFA;
+}
+.api-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.api-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.8;
+  border: 1px solid var(--border);
+}
+.tag-free {
+  color: #1f7a3d;
+  border-color: #cde7d4;
+  background: #eef9f1;
+}
+.tag-paid {
+  color: #9a3412;
+  border-color: #f5cfc0;
+  background: #fef3ee;
+}
+.tag-note {
+  color: #78520a;
+  border-color: #f1dfa7;
+  background: #fff8e4;
+}
+.api-desc { font-size: 12.5px; color: var(--text-muted); margin-bottom: 4px; line-height: 1.6; }
+.api-path { font-size: 12px; color: var(--text-muted); }
+.api-path code {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.api-footnote {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-muted);
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: #FFFFFF;
 }
 </style>

@@ -114,8 +114,18 @@ spring.datasource.password=你的密码
 
 #### 3.1 和风天气（天气功能）
 
-1. 前往 [https://console.qweather.com](https://console.qweather.com) 注册并获取 API Key
-2. 在系统「设置 → 天气服务」页面填入 Key 和中文城市名（如"北京""上海"）即可
+1. 前往 [console.qweather.com](https://console.qweather.com) 注册并创建项目
+2. 在「凭据」里创建一个 API Key，认证方式选择 **API 密钥**、启用的 API 选择 **指定 API**，只勾选下方表格中的 3 个：
+
+| API 名称 | 用途 | 对应接口 | 免费 / 收费 |
+|---|---|---|---|
+| **GeoAPI** | 中文城市名 → LocationID 解析 | `geoapi.qweather.com/v2/city/lookup` | ✅ 免费 |
+| **天气预报** | 实时天气 + 体感温度（=实况天气） | `devapi.qweather.com/v7/weather/now` | ✅ 免费 |
+| **天气指数** | 穿衣/紫外线等生活指数（保留能力） | `devapi.qweather.com/v7/indices/1d` | ✅ 免费（额度有限） |
+
+> ❌ **不要勾选**：分钟降水、辐照、海洋、空气质量、热带气旋、时光机、天气预警、天文 — 这些属于**高级付费**项目，本项目暂未使用。
+
+3. 复制凭据 Key → 进入系统「设置 → 天气服务」页面，粘贴 Key 并填写中文城市名（如"北京""上海"）保存即可。
 
 > 也支持通过 `application.properties` 配置：
 > ```properties
