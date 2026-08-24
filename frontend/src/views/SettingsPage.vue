@@ -14,7 +14,7 @@ const llmSaving = ref(false)
 const llmSaved = ref(false)
 
 // --- 天气 ---
-const weatherCfg = ref({ provider: 'qweather', apiKey: '', location: '北京', cacheTtlSeconds: 600 })
+const weatherCfg = ref({ provider: 'qweather', apiHost: '', apiKey: '', location: '北京', cacheTtlSeconds: 600 })
 const weatherSaving = ref(false)
 const weatherSaved = ref(false)
 
@@ -38,6 +38,7 @@ async function load() {
     if (!llmCfg.value.baseUrl) applyPreset('CHATGPT')
     weatherCfg.value = {
       provider: wth.provider || 'qweather',
+      apiHost: wth.apiHost || '',
       apiKey: wth.apiKey || '',
       location: wth.location || '北京',
       cacheTtlSeconds: wth.cacheTtlSeconds || 600
@@ -185,6 +186,15 @@ onMounted(load)
       <section class="config-card">
         <h2 class="card-title">和风天气</h2>
         <div class="config-item">
+          <label class="lbl">API Host <span class="required">*</span></label>
+          <input v-model="weatherCfg.apiHost" placeholder="例如：abc123xyz.def.qweatherapi.com（不带 https:// 和路径）" @input="weatherSaved = false" />
+          <p class="hint">
+            <strong>和风自 2026 年起停用了旧公共域名（geoapi/devapi/api.qweather.com，全部返回 404）</strong>。
+            请在 <code>console.qweather.com → 设置 → API Host</code> 页面复制你的<strong>个人专属 Host</strong>（形如
+            <code>xxx.def.qweatherapi.com</code>），粘贴到此。
+          </p>
+        </div>
+        <div class="config-item">
           <label class="lbl">API Key <span class="required">*</span></label>
           <input v-model="weatherCfg.apiKey" placeholder="访问 console.qweather.com 控制台创建凭据后粘贴" @input="weatherSaved = false" />
           <p class="hint">
@@ -254,9 +264,9 @@ onMounted(load)
         <h2 class="card-title">使用说明</h2>
         <div class="info-list">
           <div class="info-item"><strong>1.</strong> 打开 <code>console.qweather.com</code> 注册 / 登录账号</div>
-          <div class="info-item"><strong>2.</strong> 新建项目 → 「项目设置」里创建凭据，名称随便（如"天气1"）</div>
-          <div class="info-item"><strong>3.</strong> 身份认证方式选择 <strong>API 密钥</strong>，启用的 API 选择<strong>指定 API</strong>，勾选上方 3 项后保存</div>
-          <div class="info-item"><strong>4.</strong> 复制凭据的 Key 粘贴到本页"API Key"，填入城市名，保存后回到首页即可看到天气</div>
+          <div class="info-item"><strong>2.</strong> 复制「设置 → API Host」里的<strong>个人专属 Host</strong>，粘贴到本页 API Host（形如 <code>xxx.def.qweatherapi.com</code>）</div>
+          <div class="info-item"><strong>3.</strong> 新建项目 → 创建凭据（名称随便，身份认证选 <strong>API 密钥</strong>，启用的 API 选<strong>指定 API</strong>，勾选上方 3 项保存）</div>
+          <div class="info-item"><strong>4.</strong> 复制凭据的 Key 粘贴到本页"API Key"，填入<strong>具体城市名</strong>（填"成都"，别填省份"四川"）保存即可</div>
         </div>
       </section>
     </template>

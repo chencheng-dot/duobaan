@@ -94,16 +94,32 @@ public class ConfigService {
 
     public org.example.duobaan.model.dto.WeatherConfigDTO getWeatherConfig() {
         Optional<SystemConfig> saved = repo.findByKey(WEATHER_CONFIG_KEY);
+        DuobaanProperties.Weather w = props.getWeather();
         if (saved.isPresent()) {
             try {
-                return objectMapper.readValue(saved.get().getValue(),
-                        org.example.duobaan.model.dto.WeatherConfigDTO.class);
+                org.example.duobaan.model.dto.WeatherConfigDTO dto = objectMapper.readValue(
+                        saved.get().getValue(), org.example.duobaan.model.dto.WeatherConfigDTO.class);
+                // 向后兼容：旧配置 JSON 缺少 apiHost/provider/location 时，用 properties 补齐
+                String provider = (dto.provider() == null || dto.provider().isEmpty())
+                        ? w.getProvider() : dto.provider();
+                String apiHost = (dto.apiHost() == null || apiHostEmpty(dto)) ? w.getApiHost() : dto.apiHost();
+                String apiKey = dto.apiKey() == null ? w.getApiKey() : dto.apiKey();
+                String location = (dto.location() == null || dto.location().isEmpty())
+                        ? w.getLocation() : dto.location();
+                long ttl = dto.cacheTtlSeconds() <= 0 ? w.getCacheTtlSeconds() : dto.cacheTtlSeconds();
+                return new org.example.duobaan.model.dto.WeatherConfigDTO(
+                        provider, apiHost, apiKey, location, ttl);
             } catch (Exception ignore) {
             }
         }
-        DuobaanProperties.Weather w = props.getWeather();
         return new org.example.duobaan.model.dto.WeatherConfigDTO(
-                w.getProvider(), w.getApiKey(), w.getLocation(), w.getCacheTtlSeconds());
+                w.getProvider(), w.getApiHost(), w.getApiKey(), w.getLocation(), w.getCacheTtlSeconds());
+    }
+
+    // Jackson 反序列化 record 时，若原始 JSON 字段缺失则按 0 参填；这里兼容 apiHost 可能为 null/空串
+    private static boolean apiHostEmpty(org.example.duobaan.model.dto.WeatherConfigDTO dto) {
+        String h = dto.apiHost();
+        return h == null || h.isBlank() || "null".equalsIgnoreCase(h);
     }
 
     @Transactional

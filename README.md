@@ -114,26 +114,34 @@ spring.datasource.password=你的密码
 
 #### 3.1 和风天气（天气功能）
 
-1. 前往 [console.qweather.com](https://console.qweather.com) 注册并创建项目
-2. 在「凭据」里创建一个 API Key，认证方式选择 **API 密钥**、启用的 API 选择 **指定 API**，只勾选下方表格中的 3 个：
+> **重要变更（2026）**：和风自 2026 年起**全面停用旧公共域名**（geoapi.qweather.com / devapi.qweather.com / api.qweather.com），旧地址统一返回 **HTTP 404**。现在必须使用你账号的**个人专属 API Host**（形如 `abc123xyz.def.qweatherapi.com`，在控制台 `设置 → API Host` 页面复制）。
 
-| API 名称 | 用途 | 对应接口 | 免费 / 收费 |
+1. 打开 [console.qweather.com](https://console.qweather.com) 注册账号
+2. **「设置 → API Host」** 复制你的个人专属 Host（形如 `abc123xyz.def.qweatherapi.com`）
+3. 新建项目 → 「凭据」创建 API Key：认证方式选 **API 密钥**、启用的 API 选 **指定 API**，只勾选下表 3 个（多勾选浪费额度，少勾选会调用失败）：
+
+| API 名称 | 用途 | 对应路径（相对 API Host） | 免费 / 收费 |
 |---|---|---|---|
-| **GeoAPI** | 中文城市名 → LocationID 解析 | `geoapi.qweather.com/v2/city/lookup` | ✅ 免费 |
-| **天气预报** | 实时天气 + 体感温度（=实况天气） | `devapi.qweather.com/v7/weather/now` | ✅ 免费 |
-| **天气指数** | 穿衣/紫外线等生活指数（保留能力） | `devapi.qweather.com/v7/indices/1d` | ✅ 免费（额度有限） |
+| **GeoAPI** | 中文城市名 → LocationID 解析（必填，路径 `/geo/v2/city/lookup`） | `/geo/v2/city/lookup` | ✅ 免费 |
+| **天气预报** | 实时天气 + 体感温度（=实况天气） | `/v7/weather/now` | ✅ 免费 |
+| **天气指数** | 穿衣/紫外线等生活指数（保留能力） | `/v7/indices/1d` | ✅ 免费（额度有限） |
 
-> ❌ **不要勾选**：分钟降水、辐照、海洋、空气质量、热带气旋、时光机、天气预警、天文 — 这些属于**高级付费**项目，本项目暂未使用。
+> ❌ **不要勾选**：分钟降水、辐照、海洋、空气质量、热带气旋、时光机、天气预警、天文 — 属于**高级付费**项目，本项目暂未使用。
 
-3. 复制凭据 Key → 进入系统「设置 → 天气服务」页面，粘贴 Key 并填写中文城市名（如"北京""上海"）保存即可。
+4. 进入系统「**设置 → 天气服务**」页面，依次填：API Host（第 2 步复制）、API Key（第 3 步生成）、**具体城市名**（填「成都」不要填省份「四川」；如「北京 / 上海 / 绵阳」等）→ 保存。
 
-> 也支持通过 `application.properties` 配置：
+> 也支持在 `application.properties` 预配置：
 > ```properties
+> duobaan.weather.api-host=abc123xyz.def.qweatherapi.com
 > duobaan.weather.api-key=你的和风天气Key
-> duobaan.weather.location=北京     # 支持中文城市名或数字LocationID，默认北京
+> duobaan.weather.location=成都      # 中文城市名或数字 LocationID
+> duobaan.weather.cache-ttl-seconds=600
 > ```
 >
-> 不配置也能启动，天气接口返回占位数据。保存后顶部立即显示 7 种天气 SVG 线条图标（晴/多云/阴/雨/雪/雷/雾）+ 温度 + 体感温度。
+> 保存后右上角天气区三态展示：
+> - **虚线边框 + ❓**：未配置（缺 Host 或 Key）
+> - **红色虚线边框 + ⚠️**：已配置但调用失败（鼠标悬停会直接显示中文原因，比如「404 旧公共域名已停用」「API Key 无效」「GeoAPI 未授权」「城市[四川]未找到，请改成成都」）
+> - **正常边框**：查询成功；自动每 60 秒轮询，点击立即手动刷新。
 
 #### 3.2 大模型（对话、拆单、推荐功能）
 

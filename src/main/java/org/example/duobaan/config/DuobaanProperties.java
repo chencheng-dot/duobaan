@@ -31,8 +31,9 @@ public class DuobaanProperties {
 
     public static class Weather {
         private String provider = "qweather";
+        private String apiHost = "";
         private String apiKey = "";
-        private String location = "101010100";
+        private String location = "北京";
         private long cacheTtlSeconds = 600;
 
         public String getProvider() {
@@ -41,6 +42,14 @@ public class DuobaanProperties {
 
         public void setProvider(String provider) {
             this.provider = provider;
+        }
+
+        public String getApiHost() {
+            return apiHost;
+        }
+
+        public void setApiHost(String apiHost) {
+            this.apiHost = apiHost;
         }
 
         public String getApiKey() {
@@ -57,6 +66,7 @@ public class DuobaanProperties {
 
         public void setLocation(String location) {
             this.location = location;
+
         }
 
         public long getCacheTtlSeconds() {

@@ -51,12 +51,14 @@ onMounted(() => {
 onBeforeUnmount(() => weatherTimer && clearInterval(weatherTimer))
 
 const weatherReady = computed(() => {
-  return weather.value && weather.value.configured === true
+  return weather.value && weather.value.status === 'OK'
 })
+const weatherIsError = computed(() => weather.value && weather.value.status === 'ERROR')
+const weatherErrMsg = computed(() => weather.value?.message || '获取失败')
 
 // 天气文字 → SVG 图标类型
 const weatherIconType = computed(() => {
-  if (!weatherReady.value) return 'unknown'
+  if (!weatherReady.value) return weatherIsError.value ? 'error' : 'unknown'
   const t = weather.value.text
   if (/雷|暴.*雨|冰雹/.test(t)) return 'thunder'
   if (/雪/.test(t)) return 'snow'
@@ -69,6 +71,7 @@ const weatherIconType = computed(() => {
 })
 
 const weatherText = computed(() => {
+  if (weatherIsError.value) return '获取失败'
   if (!weatherReady.value) return '未配置天气'
   const parts = [weather.value.text || '晴']
   if (weather.value.temp !== undefined && weather.value.temp !== null && weather.value.temp !== '—') {
@@ -77,6 +80,7 @@ const weatherText = computed(() => {
   return parts.join(' ')
 })
 const feelsText = computed(() => {
+  if (weatherIsError.value) return weatherErrMsg.value.length > 14 ? weatherErrMsg.value.slice(0, 12) + '…' : weatherErrMsg.value
   if (!weatherReady.value) return '前往「设置」配置 Key'
   const f = weather.value.feelsLike
   if (f === undefined || f === null || f === '' || f === '—') return '体感—'
@@ -123,8 +127,13 @@ function goSettings() { router.push('/settings') }
       <!-- 天气 -->
       <div
         class="weather-block"
-        :class="{ 'is-empty': !weatherReady }"
-        :title="weatherReady ? (weatherText + ' · ' + feelsText + ' · 点击立即刷新') : '点击前往「设置」配置天气服务'"
+        :class="{
+          'is-empty': !weatherReady && !weatherIsError,
+          'is-error': weatherIsError
+        }"
+        :title="weatherIsError ? ('错误：' + weatherErrMsg + ' · 点击查看/重试')
+                : weatherReady ? (weatherText + ' · ' + feelsText + ' · 点击立即刷新')
+                : '点击前往「设置」配置天气服务'"
         @click="weatherReady ? forceRefresh() : goSettings()"
       >
         <!-- sunny -->
@@ -161,6 +170,11 @@ function goSettings() { router.push('/settings') }
         <svg v-else-if="weatherIconType === 'fog'" class="wicon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <path d="M5 10h14M5 14h14M5 18h14"/>
           <circle cx="18" cy="8" r="2" stroke-width="1.3"/>
+        </svg>
+        <!-- error -->
+        <svg v-else-if="weatherIconType === 'error'" class="wicon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          <path d="M12 9v4M12 17.01v.01"/>
         </svg>
         <!-- unknown -->
         <svg v-else class="wicon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -260,12 +274,23 @@ function goSettings() { router.push('/settings') }
   border-style: dashed;
 }
 .weather-block.is-empty:hover { color: var(--text); }
+.weather-block.is-error {
+  color: var(--danger);
+  border-color: var(--danger);
+  border-style: dashed;
+}
+.weather-block.is-error:hover {
+  background: #FEF2F2;
+}
 .wicon { color: var(--text); }
 .weather-block.is-empty .wicon { color: var(--text-muted); opacity: 0.7; }
+.weather-block.is-error .wicon { color: var(--danger); }
 .wtext { line-height: 1.3; }
 .wline1 { font-size: 12px; font-weight: 500; color: var(--text); }
 .weather-block.is-empty .wline1 { color: var(--text-muted); font-weight: 500; }
+.weather-block.is-error .wline1 { color: var(--danger); font-weight: 600; }
 .wline2 { font-size: 11px; color: var(--text-muted); }
+.weather-block.is-error .wline2 { color: var(--danger); }
 .divider { width: 1px; height: 28px; background: var(--border); }
 .time-block { font-size: 13px; color: var(--text); }
 .time { letter-spacing: 0.4px; }
