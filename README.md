@@ -606,37 +606,65 @@ MIT
 
 ---
 
-### v3.3.0 🔧 修复：说「把任务转到明天」只回复不动手 — 新增「任务指令自动执行器」（用户报告 bug）
+### v3.3.0 🔧 修复：说「把任务转到明天」只回复不动手 — 新增「任务指令自动执行器」（用户报告 bug，前后两轮修复）
 
-**Bug 现象**（用户截图）：办公对话里说「把这个任务转移到明天」，助手正确回复了一段 `已将任务…移至明日：```json [{"title":"…","date":"明天","status":"TODO"}] ````，**但右侧流程表「今日」仍保留 1 条、「明日」仍 0 条** — 因为 ChatPanel 只把 JSON 当文本渲染，从没解析并调用 `/api/tasks/{id}/migrate`。
+**Bug 现象（第一轮：v3.2.x 遗留问题 → v3.3.0 启动修复）**：办公对话里说「把这个任务转移到明天」，助手正确回复了一段 `已将任务…移至明日：```json [{"title":"…","date":"明天","status":"TODO"}] ````，**但右侧流程表「今日」仍保留 1 条、「明日」仍 0 条** — 因为 ChatPanel 只把 JSON 当文本渲染，从没解析并调用 `/api/tasks/{id}/migrate`。
 
-**修复思路**：ChatPanel 新增一个「流式 done 回调钩子 + 指令解析 + 副作用执行 + FlowTable 联动刷新」的闭环：
+**第一轮修复（v3.3.0 起步）**：ChatPanel 新增「流式 done 回调钩子 + 指令解析 + 副作用执行 + FlowTable 联动刷新」闭环：
 
-- `extractInstructionBlocks(text)`：用正则 `/```(?:json)?\s*([\s\S]*?)```/gi` 扒出所有代码块，支持 ` ```json ` / ` ``` ` 两种写法，接受单对象和数组。
-- 识别指令字段：
-  - `title` / `task`：按标题在「今日 + 明日」合并快照里精确→包含→反向包含三档匹配（避免模型加了前后描述词对不上）
-  - `date` / `group`：中文「今天/今日/明天/明日」+ 英文 today/tomorrow/TODAY/TOMORROW 全兼容
-  - `status`：TODO/DOING/DONE/SUBMITTED 四态
-- 执行动作（和 FlowTable 「→明日」按钮走同一套后端接口，保证语义一致）：
-  - 命中任务 + 给了新分组且不同 → `POST /api/tasks/{id}/migrate?group=…`
-  - 命中任务 + 给了新状态且不同 → `PATCH /api/tasks/{id}` `{status}`
-  - **没命中任务但给了分组**（典型场景：用户说「明天去买奶茶」流程表里没有这回事）→ `POST /api/tasks` 新建一条 source=LLM
-- 气泡下方新增「🤖 自动执行任务指令」摘要卡片（虚线边框，灰白底色），每行用 emoji 前缀区分 ✅/🔧/➕/ℹ️/💥/❌，执行中显示 spinner，**用户不用猜 "AI到底干没干"**。
-- 只要有实际变动（迁移/新建/改状态）就 `emit('tasks-created')`，借助 WorkPage 里 `flowRef.load()` 刷新今/明日列表，立刻看到「今日 0 / 明日 1」。
-- 多巴胺模式（mode=DOPAMINE）不执行：那里没有 FlowTable，执行迁移是无意义动作。
-- 非流式错误（HTTP 401、网络断）也会触发 `executeTaskInstructions`：保证即便助手出错，已经吐出的那段 JSON 指令也能落地。
+- `extractInstructionBlocks(text)`：用正则扒代码块，支持 ` ```json ` / ` ``` `；接受单对象/数组
+- 字段识别：title/task + date/group + status，三档标题精确/包含/反向匹配
+- 三种执行动作：migrate / patch-status / 未命中 + 给了 date 自动新建
+- 助手气泡下方新增「🤖 自动执行任务指令」虚线摘要卡（✅/🔧/➕/ℹ️/💥/❌ + spinner）
+- 有变动即 `emit('tasks-created') → flowRef.load()` 刷新今/明日计数
 
-**端到端实测（修复后）**
+---
+
+**Bug 现象（第二轮：v3.3.0 首版仍不生效 → 用户二报）**：用户说「这个 bug 还没修复，还是一样」。再看新截图，LLM 实际**根本没按我们设计的 `[{title,date}]` 格式吐 JSON**，而是吐了两段：
+
+```
+明日任务:
+```json
+["近期数据异常分析"]    ← 字符串数组！不是对象数组
+````
+……随后又写：
+更新后安排:
+- 今日任务: 无
+- 明日任务: 近期数据异常分析
+```json
+["近期数据异常分析"]    ← 再写一次字符串数组
+````
+
+第一轮解析器只认 `typeof x==='object' && (x.title||x.task)`，**字符串数组里 "近期数据异常分析" 是 `typeof x==='string'`，全部被 filter 丢掉** → 指令静默全跳过，助手说什么都不执行。
+
+**第二轮修复（v3.3.0 核心，兼容 LLM 不确定性）**：把解析器从「单一 schema」扩成「**四重兜底解析器**」，见 [ChatPanel.vue](frontend/src/components/ChatPanel.vue) 的 `extractTaskInstructions(bubbleContent, userLastText, allTasks)`：
+
+1. **第一层：结构化 JSON 对象数组**（助手偶尔按我们约定输出时仍能用）：`[{title,date,status}]`
+2. **第二层：字符串数组 + 小标题分组推断** —— 对应你截图里 `明日任务:` + `["近期…"]` 的写法：
+   - 用正则 `/(今天|今日|明天|明日)[\s:：]*任务[\s:：]*([^\n\r]+)/g` 扫代码块**正上方 1–2 行**，命中「明日任务:」即把整个 JSON 块的分组都设为 TOMORROW
+   - 这一步是关键：**字符串数组本身没有分组信息，分组来自上下文小标题**
+3. **第三层：纯文本正则兜底**（当 LLM 完全不写 JSON 只说人话时仍能工作）：
+   - `「今日任务：X」/「明日任务：X,Y,Z」` → heading 规则解析
+   - `「已把「XX」移至明日」` / 「把 XX 改为已完成」→ move / status 中文句式正则
+4. **第四层：指代消解兜底**（你说「把这个任务转到明天」，全篇都没写任务名）：
+   - 用户消息里含「这个 / 该 / 当前 / 此 / 这条」视为指代
+   - 命中顺序：用户消息原句直接有任务名 > 对话历史用户气泡命中 > 今日任务恰好只有 1 条时把它作为「这个」
+5. **JSON 格式容错**：LLM 常把 `["近期…"]` 包成额外字符串、写成 `\[...\]`、`\"...\"`，cleaned 阶段做三档 strip 预处理 + 二次 JSON.parse 重试，基本能吃下来
+6. **去重**：同 (title, group, status) 合并为一条，避免两段相同代码块重复执行
+7. **执行摘要来源标注**：每条指令带 `source`（如 `json-string-array(TOMORROW)` / `plaintext-heading(TOMORROW)` / `anaphora(TOMORROW)`），摘要卡第一行直接打印"识别到 N 条可执行指令（来源：…）"，方便排障
+
+---
+
+**端到端实测**
 
 | 场景 | 结果 |
 |---|---|
-| 手动调 `POST /tasks` 建今日任务 A | ✅ id=8 group=TODAY |
-| `POST /tasks/8/migrate?group=TOMORROW` | ✅ 返回 group=TOMORROW |
-| `GET /tasks?group=TODAY` & `?=TOMORROW` | ✅ 今日 1（你的「近期数据异常分析」）+ 明日 1（A），迁移命中 ✓ |
-| PowerShell 跑截图同文本的正则解析 | ✅ 命中 1 个 JSON 代码块 → `title=近期数据异常分析 date=明天 status=TODO` 全字段正确 |
-| ChatPanel 生产构建 | ✅ 46 modules / 159 KB / 57 KB gzip，无新增 ESLint 报错 |
+| 手动调 `POST /tasks` 建今日任务 A → migrate → 查询 | ✅ id=8 group 从 TODAY → TOMORROW ✓ |
+| Node 跑**你截图里的真实三段文本**（明日任务头 + 字符串数组 + 更新后安排 + 第二段同 JSON） | ✅ 命中 2 段代码块，上下文小标题 `明日任务:` 推断 blockGroup=TOMORROW → 最终去重后 1 条指令 `{title:近期数据异常分析, group:TOMORROW}` 完全符合期望 |
+| 用户消息 =「把这个任务转移到明天」（LLM 全程没给任何可识别格式，只剩这个指代） | ✅ 触发指代消解（resolveAnaphora）+ 全局分组 inferGlobalGroup=TOMORROW → 仍能执行迁移 |
+| ChatPanel 生产构建 | ✅ 46 modules / 162 KB / 59 KB gzip，无语法错误 |
 
 **文件变更**
-- [ChatPanel.vue](frontend/src/components/ChatPanel.vue)：新增 `executeTaskInstructions`、`extractInstructionBlocks`、`parseDateToGroup`、`normStatus`；`chatStream` 的 `onDone` / `onError` 两处都挂钩子；模板新增 `.exec` 执行摘要块与对应 CSS。
+- [ChatPanel.vue](frontend/src/components/ChatPanel.vue)：从 1 个 `extractInstructionBlocks` 升级为四重兜底架构 `extractTaskInstructions`；新增 `inferGroupFromContext / inferGlobalGroup / resolveAnaphora / normStatus(中文化)`；`chatStream` 的 `onDone` / `onError` 仍挂钩子；模板 `.exec` 执行摘要卡不变，但首行增加了「🔍 识别到 N 条指令（来源：…）」帮助定位解析链路。
 
 ---
