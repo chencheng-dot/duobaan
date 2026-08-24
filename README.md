@@ -251,7 +251,7 @@ npm run build         # 产物输出到 src/main/resources/static/
 - **幂等**：`CREATE TABLE IF NOT EXISTS`，表已存在则跳过
 - **不自动改表**：`ddl-auto=none`，Hibernate 不干预表结构
 - **修改表结构**：手动 `ALTER TABLE` 或修改 `schema.sql` 后手动 DROP 旧表
-- **SchemaMigrator 幂等迁移**：v2.2 起启动时自动检测 `task` 表是否缺 `deleted/deleted_at/submitted_at` 列，缺则补加，老库升级无需手动改表
+- **SchemaMigrator 幂等迁移**：v3.0 起启动时自动检测 `task` 表是否缺 `deleted/deleted_at/submitted_at` 列，缺则补加，老库升级无需手动改表
 
 ### 数据安全说明
 
@@ -335,7 +335,7 @@ npm run build         # 产物输出到 src/main/resources/static/
 
 ## 多套 API 配置使用说明
 
-v2.2 起，大模型和天气配置不再只能保存一套，支持保存**多套 Profile**，随时切换"当前生效"。
+v3.0 起，大模型和天气配置不再只能保存一套，支持保存**多套 Profile**，随时切换"当前生效"。
 
 ### 操作步骤
 
@@ -444,7 +444,7 @@ MIT
 
 ---
 
-### v2.2.0 🗂️（本次更新）
+### v3.0.0 🗂️（本次更新）
 
 **1. 多套 API 配置持久化（新建 api_profile 表）**
 
