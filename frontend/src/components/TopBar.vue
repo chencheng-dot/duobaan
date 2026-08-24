@@ -27,19 +27,36 @@ const timeText = computed(() => {
 
 // ========== 天气 ==========
 const weather = ref(null)
+let weatherTimer = null
+let weatherSeq = 0
+
 async function loadWeather() {
+  const mySeq = ++weatherSeq
   try {
     const w = await getWeather()
-    weather.value = w
+    if (mySeq === weatherSeq) weather.value = w
   } catch (e) {
-    weather.value = null
+    if (mySeq === weatherSeq) weather.value = null
   }
 }
-onMounted(loadWeather)
+function forceRefresh() {
+  // 清缓存：下次 /api/weather/now 请求直接重新取（后端 TTL 控制数据新鲜度）
+  loadWeather()
+}
+onMounted(() => {
+  loadWeather()
+  // 每 60 秒刷新一次天气；用户在设置页保存后最多 60s 内自动生效
+  weatherTimer = setInterval(loadWeather, 60 * 1000)
+})
+onBeforeUnmount(() => weatherTimer && clearInterval(weatherTimer))
+
+const weatherReady = computed(() => {
+  return weather.value && weather.value.configured === true
+})
 
 // 天气文字 → SVG 图标类型
 const weatherIconType = computed(() => {
-  if (!weather.value || !weather.value.text) return 'unknown'
+  if (!weatherReady.value) return 'unknown'
   const t = weather.value.text
   if (/雷|暴.*雨|冰雹/.test(t)) return 'thunder'
   if (/雪/.test(t)) return 'snow'
@@ -52,15 +69,17 @@ const weatherIconType = computed(() => {
 })
 
 const weatherText = computed(() => {
-  if (!weather.value) return '—'
+  if (!weatherReady.value) return '未配置天气'
   const parts = [weather.value.text || '晴']
-  if (weather.value.temp !== undefined && weather.value.temp !== null) parts.push(`${weather.value.temp}℃`)
+  if (weather.value.temp !== undefined && weather.value.temp !== null && weather.value.temp !== '—') {
+    parts.push(`${weather.value.temp}℃`)
+  }
   return parts.join(' ')
 })
 const feelsText = computed(() => {
-  if (!weather.value) return '体感—'
+  if (!weatherReady.value) return '前往「设置」配置 Key'
   const f = weather.value.feelsLike
-  if (f === undefined || f === null || f === '') return '体感—'
+  if (f === undefined || f === null || f === '' || f === '—') return '体感—'
   return `体感${f}℃`
 })
 
@@ -102,7 +121,12 @@ function goSettings() { router.push('/settings') }
     <!-- 右侧：天气 + 时间 + 设置 -->
     <div class="right">
       <!-- 天气 -->
-      <div class="weather-block" :title="weatherText + ' · ' + feelsText">
+      <div
+        class="weather-block"
+        :class="{ 'is-empty': !weatherReady }"
+        :title="weatherReady ? (weatherText + ' · ' + feelsText + ' · 点击立即刷新') : '点击前往「设置」配置天气服务'"
+        @click="weatherReady ? forceRefresh() : goSettings()"
+      >
         <!-- sunny -->
         <svg v-if="weatherIconType === 'sunny'" class="wicon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="4"/>
@@ -227,10 +251,20 @@ function goSettings() { router.push('/settings') }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: #FFFFFF;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
 }
+.weather-block:hover { border-color: var(--text); }
+.weather-block.is-empty {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+.weather-block.is-empty:hover { color: var(--text); }
 .wicon { color: var(--text); }
+.weather-block.is-empty .wicon { color: var(--text-muted); opacity: 0.7; }
 .wtext { line-height: 1.3; }
 .wline1 { font-size: 12px; font-weight: 500; color: var(--text); }
+.weather-block.is-empty .wline1 { color: var(--text-muted); font-weight: 500; }
 .wline2 { font-size: 11px; color: var(--text-muted); }
 .divider { width: 1px; height: 28px; background: var(--border); }
 .time-block { font-size: 13px; color: var(--text); }
