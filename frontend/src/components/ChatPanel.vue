@@ -8,7 +8,11 @@ import {
   generateImage,
   generateSpeech,
   transcribeAudio,
-  generateVideo
+  generateVideo,
+  getTasks,
+  migrateTask,
+  patchTask,
+  createTask
 } from '../api'
 
 const props = defineProps({
@@ -129,6 +133,8 @@ async function sendTextLLM(text) {
       bubble.streaming = false
       loading.value = false
       abortFn = null
+      // 流式完成后自动解析 ```json``` 任务指令 → 调 migrate/patch/create → 触发 FlowTable 刷新
+      executeTaskInstructions(bubble)
     },
     onError: (msg) => {
       bubble.content += `\n[流式错误: ${msg}]`
@@ -136,6 +142,7 @@ async function sendTextLLM(text) {
       bubble.degraded = true
       loading.value = false
       abortFn = null
+      executeTaskInstructions(bubble) // 即便出错，已收到的 JSON 仍要执行
     }
   })
 }
@@ -147,6 +154,139 @@ function stop() {
   if (last && last.streaming) {
     last.streaming = false
     last.content += '\n[已中止]'
+  }
+}
+
+// ================= 任务指令自动执行器（解决：用户说"把任务转到明天"，助手只说不做）=================
+/**
+ * 大模型返回的约定格式（包裹在 ```json ``` 代码块中，可多个）：
+ *   [{ "title": "近期数据异常分析", "date": "今天"|"明天"|"今日"|"明日"|"TODAY"|"TOMORROW", "status": "TODO"|"DOING"|"DONE"|"SUBMITTED" }]
+ *
+ * 字段含义：
+ *  - title 必填：按标题精确/包含匹配流程表里的任务（先搜今日再搜明日，取首条命中）
+ *  - date  可选：改分组 → 调 /api/tasks/{id}/migrate
+ *  - status 可选：改状态 → 调 /api/tasks/{id}/patch
+ *  - 若 title 未找到 + 给了 date → 新建一个任务到该分组（用户说"明天去买奶茶"，没这条也能自动建）
+ *
+ * 执行成功后会：
+ *  1. 在助手气泡下方追加一个 "已自动执行：…" 的摘要块
+ *  2. emit('tasks-created') 触发 WorkPage 里的 flowRef.load() 重新拉取今/明日列表
+ */
+
+function parseDateToGroup(s) {
+  if (!s) return null
+  const k = String(s).trim()
+  if (/^(今天|今日|today|TODAY)$/.test(k)) return 'TODAY'
+  if (/^(明天|明日|tomorrow|TOMORROW)$/.test(k)) return 'TOMORROW'
+  return null
+}
+function normStatus(s) {
+  if (!s) return null
+  const k = String(s).trim().toUpperCase()
+  return ['TODO', 'DOING', 'DONE', 'SUBMITTED'].includes(k) ? k : null
+}
+function extractInstructionBlocks(text) {
+  // 支持 ```json ...```（助手正规格式）、``` ...```（没写 json）、以及 ```"xxx" / ```json"yyy" 这种开头换行不严谨的格式
+  if (!text) return []
+  const blocks = []
+  const re = /```(?:json)?\s*([\s\S]*?)```/gi
+  let m
+  while ((m = re.exec(text)) !== null) {
+    const raw = (m[1] || '').trim()
+    if (!raw) continue
+    // 接受数组 JSON 或单个对象 JSON（单对象转数组）
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) blocks.push(...parsed)
+      else if (parsed && typeof parsed === 'object') blocks.push(parsed)
+    } catch (_) {
+      // 非 JSON 代码块（如 markdown 说明）忽略
+    }
+  }
+  return blocks
+}
+async function executeTaskInstructions(bubble) {
+  const text = bubble.content || ''
+  const instructions = extractInstructionBlocks(text)
+    .filter((x) => x && typeof x === 'object' && (x.title || x.task))
+  if (!instructions.length) return
+  if (props.mode !== 'WORK') return // 仅办公模式有流程表，多巴胺模式不执行
+
+  bubble.executing = true
+  bubble.execResults = []
+  await scrollToBottom()
+
+  let changed = false
+  try {
+    // 一次性拉取今/明日任务快照（避免多次并发 / 任务没在当前分组找不到）
+    const [todayList, tomorrowList] = await Promise.all([getTasks('TODAY'), getTasks('TOMORROW')])
+    const all = [...todayList, ...tomorrowList]
+    function findTask(title) {
+      if (!title) return null
+      const t = String(title).trim()
+      if (!t) return null
+      return (
+        all.find((x) => x.title === t) ||
+        all.find((x) => x.title && x.title.includes(t)) ||
+        all.find((x) => t.includes(x.title))
+      )
+    }
+
+    for (const ins of instructions) {
+      const title = (ins.title || ins.task || '').toString().trim()
+      const group = parseDateToGroup(ins.date || ins.group)
+      const status = normStatus(ins.status)
+      if (!title) { bubble.execResults.push('⚠️ 指令缺少 title，已跳过'); continue }
+      try {
+        const existing = findTask(title)
+        if (!existing) {
+          if (group) {
+            const created = await createTask({ title, category: 'LLM', group })
+            changed = true
+            bubble.execResults.push(`➕ 流程表没找到「${title}」，已新建到「${group === 'TODAY' ? '今日' : '明日'}」id=${created.id}`)
+            if (status && status !== created.status) {
+              const up = await patchTask(created.id, { status })
+              bubble.execResults.push(`🔧 新建任务「${title}」状态改为 ${up.status}`)
+            }
+          } else {
+            bubble.execResults.push(`❌ 没找到「${title}」任务，且未给出 date/group，无法迁移/新建`)
+          }
+          continue
+        }
+        // 迁移分组
+        if (group && existing.group !== group) {
+          await migrateTask(existing.id, group)
+          changed = true
+          bubble.execResults.push(`✅ 「${title}」已迁移至「${group === 'TODAY' ? '今日' : '明日'}」`)
+          existing.group = group // 保持本地快照一致
+        } else if (group) {
+          bubble.execResults.push(`ℹ️ 「${title}」已在「${group === 'TODAY' ? '今日' : '明日'}」，无需迁移`)
+        }
+        // 修改状态
+        if (status && existing.status !== status) {
+          await patchTask(existing.id, { status })
+          changed = true
+          bubble.execResults.push(`🔧 「${title}」状态改为 ${status}`)
+        } else if (status) {
+          bubble.execResults.push(`ℹ️ 「${title}」状态已是 ${status}`)
+        }
+        if (!group && !status) {
+          bubble.execResults.push(`ℹ️ 「${title}」指令未给出 date 或 status，不做变更`)
+        }
+      } catch (e) {
+        bubble.execResults.push(`💥 处理「${title}」失败：${e.message || String(e)}`)
+      }
+    }
+  } catch (e) {
+    bubble.execResults.push(`💥 拉取任务快照失败：${e.message || String(e)}`)
+  } finally {
+    bubble.executing = false
+    scrollToBottom()
+  }
+
+  if (changed) {
+    // 通知 WorkPage 里的 FlowTable 重新加载 → 用户看到「今日 0 / 明日 1」
+    emit('tasks-created')
   }
 }
 
@@ -408,6 +548,18 @@ function sendDisabled() {
           <span v-if="m.degraded" class="badge">降级</span>
         </div>
 
+        <!-- 任务指令自动执行结果摘要 -->
+        <div v-if="m.executing || (m.execResults && m.execResults.length)" class="exec">
+          <div class="exec-head">
+            <span>🤖 自动执行任务指令</span>
+            <span v-if="m.executing" class="spinner"></span>
+          </div>
+          <div v-if="m.execResults && m.execResults.length" class="exec-list">
+            <div v-for="(r, j) in m.execResults" :key="j" class="exec-line">{{ r }}</div>
+          </div>
+          <div v-else class="muted" style="font-size:12px">执行中…</div>
+        </div>
+
         <!-- 富内容：图片 -->
         <div v-if="m.rich && m.rich.kind === 'IMAGE' && m.rich.payload && m.rich.payload.items" class="rich-grid">
           <a
@@ -655,6 +807,35 @@ function sendDisabled() {
   border: 1px solid var(--border);
   background: #000;
 }
+
+/* 任务指令自动执行摘要块 */
+.exec {
+  width: 100%;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  background: #fafafa;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.exec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: var(--text);
+  font-weight: 600;
+}
+.exec-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.6;
+}
+.exec-line { word-break: break-word; }
 
 .parsed {
   border-top: 1px solid var(--border);

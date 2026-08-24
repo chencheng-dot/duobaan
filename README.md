@@ -605,3 +605,38 @@ MIT
 | 刷新浏览器 → 富内容图片气泡 | ✅ 从 `%%RICH_MEDIA%%` JSON 自动还原 `<img>` |
 
 ---
+
+### v3.2.1 🔧 修复：说「把任务转到明天」只回复不动手 — 新增「任务指令自动执行器」
+
+**Bug 现象**（用户截图）：办公对话里说「把这个任务转移到明天」，助手正确回复了一段 `已将任务…移至明日：```json [{"title":"…","date":"明天","status":"TODO"}] ````，**但右侧流程表「今日」仍保留 1 条、「明日」仍 0 条** — 因为 ChatPanel 只把 JSON 当文本渲染，从没解析并调用 `/api/tasks/{id}/migrate`。
+
+**修复思路**：ChatPanel 新增一个「流式 done 回调钩子 + 指令解析 + 副作用执行 + FlowTable 联动刷新」的闭环：
+
+- `extractInstructionBlocks(text)`：用正则 `/```(?:json)?\s*([\s\S]*?)```/gi` 扒出所有代码块，支持 ` ```json ` / ` ``` ` 两种写法，接受单对象和数组。
+- 识别指令字段：
+  - `title` / `task`：按标题在「今日 + 明日」合并快照里精确→包含→反向包含三档匹配（避免模型加了前后描述词对不上）
+  - `date` / `group`：中文「今天/今日/明天/明日」+ 英文 today/tomorrow/TODAY/TOMORROW 全兼容
+  - `status`：TODO/DOING/DONE/SUBMITTED 四态
+- 执行动作（和 FlowTable 「→明日」按钮走同一套后端接口，保证语义一致）：
+  - 命中任务 + 给了新分组且不同 → `POST /api/tasks/{id}/migrate?group=…`
+  - 命中任务 + 给了新状态且不同 → `PATCH /api/tasks/{id}` `{status}`
+  - **没命中任务但给了分组**（典型场景：用户说「明天去买奶茶」流程表里没有这回事）→ `POST /api/tasks` 新建一条 source=LLM
+- 气泡下方新增「🤖 自动执行任务指令」摘要卡片（虚线边框，灰白底色），每行用 emoji 前缀区分 ✅/🔧/➕/ℹ️/💥/❌，执行中显示 spinner，**用户不用猜 "AI到底干没干"**。
+- 只要有实际变动（迁移/新建/改状态）就 `emit('tasks-created')`，借助 WorkPage 里 `flowRef.load()` 刷新今/明日列表，立刻看到「今日 0 / 明日 1」。
+- 多巴胺模式（mode=DOPAMINE）不执行：那里没有 FlowTable，执行迁移是无意义动作。
+- 非流式错误（HTTP 401、网络断）也会触发 `executeTaskInstructions`：保证即便助手出错，已经吐出的那段 JSON 指令也能落地。
+
+**端到端实测（修复后）**
+
+| 场景 | 结果 |
+|---|---|
+| 手动调 `POST /tasks` 建今日任务 A | ✅ id=8 group=TODAY |
+| `POST /tasks/8/migrate?group=TOMORROW` | ✅ 返回 group=TOMORROW |
+| `GET /tasks?group=TODAY` & `?=TOMORROW` | ✅ 今日 1（你的「近期数据异常分析」）+ 明日 1（A），迁移命中 ✓ |
+| PowerShell 跑截图同文本的正则解析 | ✅ 命中 1 个 JSON 代码块 → `title=近期数据异常分析 date=明天 status=TODO` 全字段正确 |
+| ChatPanel 生产构建 | ✅ 46 modules / 159 KB / 57 KB gzip，无新增 ESLint 报错 |
+
+**文件变更**
+- [ChatPanel.vue](frontend/src/components/ChatPanel.vue)：新增 `executeTaskInstructions`、`extractInstructionBlocks`、`parseDateToGroup`、`normStatus`；`chatStream` 的 `onDone` / `onError` 两处都挂钩子；模板新增 `.exec` 执行摘要块与对应 CSS。
+
+---
