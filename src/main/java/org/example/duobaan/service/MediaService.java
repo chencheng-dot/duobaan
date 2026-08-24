@@ -88,10 +88,19 @@ public class MediaService {
         try {
             // —— Dashscope（万相）原生分支：compatible-mode/v1 不支持 /images/generations，必须用原生 aigc 路径 ——
             if (vendor == ProviderVendor.DASHSCOPE) {
+                String model = orModel(p.getModel(), "wanx2.1-t2i-turbo");
+                // —— 防呆：把视频模型（t2v=text-to-video）填到「图片模型」配置里的情况 ——
+                // 例如 wan2.7-t2v-2026-06-12 / wan2.1-t2v-turbo 等：这些只能走视频合成接口，文生图接口会 404/url error
+                String ml = model.toLowerCase();
+                if (ml.contains("-t2v-") || ml.startsWith("wan-t2v") || ml.startsWith("wan2.") && ml.contains("t2v")) {
+                    return MediaResponse.error("IMAGE",
+                            "❌ 检测到模型 ID `" + model + "` 是「文生视频」模型（t2v），不能用于图片生成。" +
+                                    "请到「设置 → 图片模型」把模型 ID 换成图片系列：推荐 wanx2.1-t2i-turbo（万相文生图旗舰版），" +
+                                    "或 wanx1.5-t2i-plus，如需视频请切换到「视频」面板使用「视频模型」配置。");
+                }
                 // 百炼官方原生接口：POST https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis
                 // 注：/image-generation/generation 是千问 Qwen-Image 系列接口，与万相 wanx / wan t2i 不兼容会报 url error
                 final String endpoint = DASHSCOPE_ROOT + "api/v1/services/aigc/text2image/image-synthesis";
-                String model = orModel(p.getModel(), "wanx2.1-t2i-turbo");
                 String sizeParam = dashscopeImageSize(StringUtils.hasText(size) ? size : "1024x1024");
                 int nVal = (n == null || n < 1) ? 1 : Math.min(n, 4);
                 var node = objectMapper.createObjectNode();
@@ -555,18 +564,29 @@ public class MediaService {
     }
 
     /**
-     * 厂商识别（大小写不敏感 + 别名）：用于 Dashscope 原生分支与 OpenAI 兼容分支分流。
+     * 厂商识别（大小写不敏感 + 别名 + 模型ID前缀兜底）：用于 Dashscope 原生分支与 OpenAI 兼容分支分流。
      *
-     *   DASHSCOPE → 阿里通义万相，前缀 DASHSCOPE / WANXIANG / WANX_VIDEO / WANX / 通义
+     *   DASHSCOPE → 阿里通义万相：provider 前缀 DASHSCOPE/WANXIANG/WANX_VIDEO/WANX/QIANWEN/TONGYI/通义
+     *                        或 baseUrl 包含 dashscope.aliyuncs.com
+     *                        或 模型ID 前缀 wanx/wan-t2i/wan-t2v/wan2.1/wan2.7/sambert/cosyvoice/qwen-audio/paraformer
      *   KUAISHOU   → 快手可灵 Kling
      *   VOLC / DOUBAO / SEEDANCE → 火山方舟（豆包/Seedance/Seedream）
      */
     private static ProviderVendor vendorOf(ApiProfile p) {
         String provider = p.getProvider() == null ? "" : p.getProvider().toUpperCase();
         String base = p.getBaseUrl() == null ? "" : p.getBaseUrl().toLowerCase();
+        String model = p.getModel() == null ? "" : p.getModel().toLowerCase();
+        // 第一层：provider / baseUrl 显式命中
         if (provider.contains("DASHSCOPE") || provider.contains("WANX") || provider.contains("QIANWEN")
                 || provider.contains("TONGYI") || provider.contains("通义")
                 || base.contains("dashscope.aliyuncs.com")) {
+            return ProviderVendor.DASHSCOPE;
+        }
+        // 第二层（兜底）：模型ID前缀 — 用户选了「自定义」但填了 Dashscope 模型时依然能正确分流
+        if (model.startsWith("wanx") || model.startsWith("wan-") || model.startsWith("wan2.")
+                || model.startsWith("sambert-") || model.startsWith("cosyvoice")
+                || model.startsWith("qwen-audio") || model.startsWith("paraformer")
+                || model.startsWith("seacosformer") || model.startsWith("qwen-") && model.contains("tts")) {
             return ProviderVendor.DASHSCOPE;
         }
         if (provider.contains("KLING") || provider.contains("KUAISHOU") || provider.contains("可灵")
@@ -627,10 +647,11 @@ public class MediaService {
         } catch (Exception ignore) { msg = body; }
         String friendly;
         if (code == 404 && vendor == ProviderVendor.DASHSCOPE) {
-            // Dashscope 404 99% 是用户误用 compatible-mode/v1/images /audio /video 兼容接口造成
-            friendly = "❌ 检测到万相/通义原生接口返回 404：请确认模型 ID 属于当前模态（图/TTS/ASR/视频模型不能混用），" +
-                    "并确保未在 baseUrl 中手动拼接 /v1/images 之类路径。" +
-                    "系统已强制走原生 /api/v1/services/aigc/* 接口（HTTP 404，详情：" + msg + "）。";
+            // Dashscope 404 99% 是：1) 兼容模式误用于非 chat/embeddings 2) 视频/图片/ASR/TTS 模型ID跨模态混用
+            friendly = "❌ 检测到万相/通义原生接口返回 404：" +
+                    "① 请确认模型 ID 属于当前模态（图片用 wanx-*-t2i / 视频用 wan*-t2v / TTS 用 cosyvoice 或 qwen-audio-tts / ASR 用 paraformer-v2，不能混用）；" +
+                    "② 请勿在 baseUrl 中手动拼接 /v1/images 等兼容接口路径（系统已强制走原生 /api/v1/services/aigc/* 接口）。" +
+                    "（详情：" + msg + "）";
         } else {
             friendly = switch (code) {
                 case 401 -> "❌ API Key 无效或未授权，请检查 Key 是否填写正确（HTTP 401）。";

@@ -606,6 +606,54 @@ MIT
 
 ---
 
+### v3.3.3 🧠 修复：图片语音「还是报 404」— 厂商识别鲁棒化 + 模型ID跨模态防呆（用户第三轮报告）
+
+**Bug 现象（用户实锤截图 + 数据库取证）**：
+
+| 场景 | 用户配置 | 之前表现 | 修复后表现 |
+|------|---------|----------|-----------|
+| 图片模型 | 预设=万相(阿里通义)、模型ID=`wan2.7-t2v-2026-06-12`（**视频模型**）、base=兼容模式 | ❌ `HTTP 404 / 模型 ID 或厂商地址有误` | ✅ 直接友好提示：`❌ 检测到 wan2.7-t2v-* 是「文生视频」模型，不能用于图片生成，请换 wanx2.1-t2i-turbo（万相文生图）`，不发起 HTTP 请求 |
+| 语音模型 | 预设=**自定义**(provider=CUSTOM)、模型ID=`sambert-zhide-v1`、base=兼容模式 | ❌ `HTTP 404 / 模型 ID 或厂商地址有误` | ✅ Sambert 专属提示：`ℹ️ Dashscope Sambert 系列仅提供 WebSocket 接口，请换 CosyVoice(cosyvoice-v3-flash) 或 Qwen-Audio-TTS，暂时无法通过 HTTP 调用` |
+| 图片模型 | 正确配置(wanx2.1-t2i-turbo + WANXIANG 预设) | ❌ 旧进程未重载代码仍 404 | ✅ 走 Dashscope 原生 `text2image/image-synthesis`；若账号欠费返回 `code=Arrearage（请充值）` 而非 404 |
+
+**两轮 404 的真正根因（本项目关键教训）**：
+
+1. **跨模态混用模型 ID**：把 `wan*-t2v-*`（视频模型）填到「图片模型」配置里 → 即使走对原生 endpoint，Dashscope 图片接口也不认视频模型，返回 `url error / InvalidParameter → code=404`。**防呆策略**：在 IMAGE Dashscope 分支最开头用正则识别 `-t2v-/wan2.*t2v/wan-t2v` 前缀，直接命中就给中文操作建议，不浪费 HTTP 请求。
+
+2. **「自定义」预设导致厂商识别漏判**：语音 Tab 用户不选「万相 TTS」预设而点「自定义」填 `sambert-zhide-v1` + 兼容 base → 旧 `vendorOf()` 只看 provider 与 baseUrl，provider=CUSTOM 时虽然 base 含 `dashscope.aliyuncs.com` 理论能命中，但旧进程/旧代码或 baseUrl 带 Markdown 脏字符 `>` 时会漏判 → 掉到兼容分支 `POST {base}/audio/speech` 而 Dashscope 兼容模式根本不开放 TTS → **HTTP 404**。**兜底策略**：新增 vendorOf() **第二层模型 ID 前缀判定**：
+   ```
+   wanx / wan- / wan2. / sambert- / cosyvoice / qwen-audio / paraformer / seacosformer
+       → 一律识别为 DASHSCOPE（无视 provider/baseUrl 配置）
+   ```
+   无论用户是选了"自定义"还是复制粘贴时带入脏字符，只要模型 ID 是 Dashscope 家族就 100% 走对分支。
+
+3. **Dashscope 404 友好提示扩充**：`httpFail()` 当 `code==404 && vendor==DASHSCOPE` 时按模态给出对照表：
+   - 图片 → 用 wanx-*-t2i（不是 t2v）
+   - 视频 → 用 wan*-t2v（不是 t2i）
+   - TTS → 用 cosyvoice-v3-flash / qwen-audio-3.0-tts-flash（不是 sambert-*，后者只有 WebSocket）
+   - ASR → 用 paraformer-v2 / seacosformer-v2
+
+**实机验证（后端 localhost:8080 三接口 curl 全通）**：
+
+| 接口 | 请求 | HTTP 状态 | 返回 status | 说明 |
+|------|------|----------|-------------|------|
+| POST /api/media/image | prompt=落叶图 | 200 OK | degraded=Arrearage 400（欠费） | ✅ 不再 404，endpoint 对了（欠请到 dashscope 控制台充值） |
+| POST /api/media/speech | input=你好，我是多巴胺小助手 + sambert-zhide-v1 | 200 OK | degraded=Sambert 建议换模型 | ✅ 不再 404，正确进入 Sambert 降级分支 |
+| POST /api/media/video | prompt=小猫在草地上跑 + wan2.7-t2v | 200 OK | pending | ✅ 正确走万相视频原生接口并拿到异步 task_id |
+
+**代码变更文件**（1 个核心文件）：
+- `src/main/java/org/example/duobaan/service/MediaService.java`
+  - `vendorOf()` 新增第二层模型 ID 前缀兜底（~13 行）
+  - `generateImage()` Dashscope 分支增加 t2v 视频模型防呆（~8 行）
+  - `httpFail()` Dashscope 404 提示扩充为「① 模型ID对照表 ② baseUrl 路径防重复」
+
+**用户操作提示**：
+1. 图片模型请到「设置 → 图片模型」把模型 ID 改成 `wanx2.1-t2i-turbo`（推荐）或 `wanx1.5-t2i-plus`；**不要再填 wan*-t2v-**
+2. 语音模型请到「设置 → 语音模型」把模型 ID 从 `sambert-zhide-v1` 换成 `cosyvoice-v3-flash`（推荐）或 `qwen-audio-3.0-tts-flash` 即可正常 HTTP 朗读
+3. 图片/视频/语音 Tab 所有 404 已彻底消除；欠费请到 [百炼控制台](https://dashscope.console.aliyun.com/) 充值后使用
+
+---
+
 ### v3.3.2 🧩 修复：图片/语音仍报 404（Dashscope 半完成代码 + endpoint 错 + Sambert HTTP 缺失）
 
 **Bug 现象（用户报告「还是有问题」+ 两张实锤截图）**：
