@@ -19,6 +19,7 @@ import org.example.duobaan.model.TaskGroup;
 import org.example.duobaan.model.dto.ChatResponse;
 import org.example.duobaan.model.dto.LlmChat;
 import org.example.duobaan.model.dto.LlmChat.Message;
+import org.example.duobaan.model.dto.LlmConfigDTO;
 import org.example.duobaan.model.dto.LlmStreamChunk;
 import org.example.duobaan.model.dto.ParsedTask;
 import org.springframework.stereotype.Service;
@@ -29,6 +30,7 @@ import tools.jackson.databind.ObjectMapper;
 /**
  * 大模型统一网关：屏蔽厂商差异，按模式加载双系统提示词（办公 Agent / 多巴胺餐食 Agent）。
  * 支持非流式对话、流式对话（SSE）、任务拆单（结构化 JSON）。
+ * 配置优先级：数据库运行时配置 > application.properties 默认值。
  * 未配置 Key 时返回降级提示，保证平台可独立启动。
  */
 @Service
@@ -38,31 +40,42 @@ public class LlmGatewayService {
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final DuobaanProperties props;
+    private final ConfigService configService;
 
     public LlmGatewayService(RestClient externalRestClient, HttpClient httpClient,
-            ObjectMapper objectMapper, DuobaanProperties props) {
+            ObjectMapper objectMapper, DuobaanProperties props, ConfigService configService) {
         this.restClient = externalRestClient;
         this.httpClient = httpClient;
         this.objectMapper = objectMapper;
         this.props = props;
+        this.configService = configService;
+    }
+
+    /** 取当前生效的大模型配置（运行时可修改） */
+    private LlmConfigDTO currentConfig() {
+        return configService.getLlmConfig();
+    }
+
+    private boolean isConfigured(LlmConfigDTO cfg) {
+        return cfg.apiKey() != null && !cfg.apiKey().isBlank();
     }
 
     /**
      * 单轮对话（非流式）：用系统提示词 + 用户消息调用大模型。
      */
     public ChatResponse chat(String userMessage, ChatMode mode, String systemContext) {
-        DuobaanProperties.Llm cfg = props.getLlm();
-        if (!cfg.isConfigured()) {
+        LlmConfigDTO cfg = currentConfig();
+        if (!isConfigured(cfg)) {
             return degradedReply(userMessage, mode);
         }
         List<Message> messages = new ArrayList<>();
         messages.add(new Message("system", buildSystemPrompt(mode, systemContext)));
         messages.add(new Message("user", userMessage));
         try {
-            LlmChat.Request request = new LlmChat.Request(cfg.getModel(), messages);
+            LlmChat.Request request = new LlmChat.Request(cfg.model(), messages);
             LlmChat.Response resp = restClient.post()
-                    .uri(cfg.getBaseUrl() + "/chat/completions")
-                    .header("Authorization", "Bearer " + cfg.getApiKey())
+                    .uri(cfg.baseUrl() + "/chat/completions")
+                    .header("Authorization", "Bearer " + cfg.apiKey())
                     .header("Content-Type", "application/json")
                     .body(request)
                     .retrieve()
@@ -81,15 +94,15 @@ public class LlmGatewayService {
      * 调用方负责把 onDelta 投递到 SSE 通道。
      */
     public void chatStream(String userMessage, ChatMode mode, String systemContext, Consumer<String> onDelta) {
-        DuobaanProperties.Llm cfg = props.getLlm();
-        if (!cfg.isConfigured()) {
+        LlmConfigDTO cfg = currentConfig();
+        if (!isConfigured(cfg)) {
             onDelta.accept(degradedHint(userMessage, mode));
             return;
         }
         try {
             String body = objectMapper.writeValueAsString(new java.util.HashMap<>() {
                 {
-                    put("model", cfg.getModel());
+                    put("model", cfg.model());
                     put("stream", true);
                     put("messages", List.of(
                             new Message("system", buildSystemPrompt(mode, systemContext)),
@@ -97,10 +110,10 @@ public class LlmGatewayService {
                 }
             });
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(cfg.getBaseUrl() + "/chat/completions"))
-                    .header("Authorization", "Bearer " + cfg.getApiKey())
+                    .uri(URI.create(cfg.baseUrl() + "/chat/completions"))
+                    .header("Authorization", "Bearer " + cfg.apiKey())
                     .header("Content-Type", "application/json")
-                    .timeout(Duration.ofSeconds(cfg.getTimeoutSeconds()))
+                    .timeout(Duration.ofSeconds(cfg.timeoutSeconds()))
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
 
@@ -147,8 +160,8 @@ public class LlmGatewayService {
      * 解析失败时返回空列表，由调用方降级处理。
      */
     public List<ParsedTask> parseTasks(String userMessage, TaskGroup defaultGroup) {
-        DuobaanProperties.Llm cfg = props.getLlm();
-        if (!cfg.isConfigured()) {
+        LlmConfigDTO cfg = currentConfig();
+        if (!isConfigured(cfg)) {
             return List.of();
         }
         String systemPrompt = """
@@ -161,10 +174,10 @@ public class LlmGatewayService {
             List<Message> messages = List.of(
                     new Message("system", systemPrompt),
                     new Message("user", userMessage));
-            LlmChat.Request request = new LlmChat.Request(cfg.getModel(), messages);
+            LlmChat.Request request = new LlmChat.Request(cfg.model(), messages);
             LlmChat.Response resp = restClient.post()
-                    .uri(cfg.getBaseUrl() + "/chat/completions")
-                    .header("Authorization", "Bearer " + cfg.getApiKey())
+                    .uri(cfg.baseUrl() + "/chat/completions")
+                    .header("Authorization", "Bearer " + cfg.apiKey())
                     .header("Content-Type", "application/json")
                     .body(request)
                     .retrieve()

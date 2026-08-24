@@ -99,3 +99,9 @@ export const recommendMeal = (ctx) =>
 
 export const adoptMeal = (mealTitle) =>
   json(`${BASE}/recommend/adopt?mealTitle=${encodeURIComponent(mealTitle)}`, { method: 'POST', body: '{}' })
+
+// === 系统配置 ===
+export const getLlmConfig = () => json(`${BASE}/config/llm`)
+export const saveLlmConfig = (dto) =>
+  json(`${BASE}/config/llm`, { method: 'POST', body: JSON.stringify(dto) })
+export const getProviders = () => json(`${BASE}/config/providers`)

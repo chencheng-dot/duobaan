@@ -30,6 +30,16 @@ function go(name) {
       <span class="ic">🍜</span>
       <span class="lbl">多巴胺</span>
     </button>
+    <div class="spacer"></div>
+    <button
+      class="mode-btn"
+      :class="{ active: current === 'settings' }"
+      @click="go('settings')"
+      title="大模型配置"
+    >
+      <span class="ic">⚙️</span>
+      <span class="lbl">设置</span>
+    </button>
   </aside>
 </template>
 
@@ -41,6 +51,7 @@ function go(name) {
   gap: 8px;
   flex-shrink: 0;
 }
+.spacer { flex: 1; }
 .mode-btn {
   display: flex;
   flex-direction: column;
@@ -67,5 +78,11 @@ function go(name) {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent-text);
+}
+/* 设置按钮激活态 */
+.mode-btn:last-child.active {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #92400e;
 }
 </style>

@@ -28,3 +28,11 @@ CREATE TABLE IF NOT EXISTS `chat_message` (
     `created_at` DATETIME(6)  NOT NULL,
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 系统配置表：key-value 结构，存放大模型提供商等可运行时修改的配置
+CREATE TABLE IF NOT EXISTS `system_config` (
+    `cfg_key`    VARCHAR(100)  NOT NULL,
+    `cfg_value`  MEDIUMTEXT    NOT NULL,
+    `updated_at` DATETIME(6)   NOT NULL,
+    PRIMARY KEY (`cfg_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
