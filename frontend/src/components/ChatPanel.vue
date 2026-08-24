@@ -1,6 +1,6 @@
 <script setup>
-import { ref, nextTick } from 'vue'
-import { chatStream, parseTasks, bulkCreateTasks } from '../api'
+import { ref, nextTick, onMounted } from 'vue'
+import { chatStream, parseTasks, bulkCreateTasks, getChatHistory } from '../api'
 
 const props = defineProps({
   mode: { type: String, default: 'WORK' }, // WORK | DOPAMINE
@@ -26,6 +26,23 @@ async function scrollToBottom() {
   await nextTick()
   if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
 }
+
+/** 组件挂载时拉最近 50 条历史，恢复上一次对话 — 刷新页面不再空 */
+onMounted(async () => {
+  try {
+    const list = await getChatHistory(props.mode, 50)
+    if (Array.isArray(list) && list.length) {
+      messages.value = list.map((m) => ({
+        role: m.role || 'assistant',
+        content: m.content ?? ''
+      }))
+      await scrollToBottom()
+    }
+  } catch (e) {
+    // 拉历史失败不阻断对话功能，仅当首次加载为空
+    console.warn('[ChatPanel] 加载对话历史失败：', e.message)
+  }
+})
 
 async function send() {
   const text = input.value.trim()

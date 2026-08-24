@@ -90,6 +90,10 @@ function handleSse(raw, { onDelta, onDone, onError } = {}) {
 export const parseTasks = (message, group) =>
   json(`${BASE}/llm/parse-tasks`, { method: 'POST', body: JSON.stringify({ message, group }) })
 
+/** 获取某 mode 下最近 N 条对话历史（时间正序：旧→新），用于刷新后恢复 */
+export const getChatHistory = (mode = 'WORK', limit = 50) =>
+  json(`${BASE}/llm/history?mode=${encodeURIComponent(mode)}&limit=${limit}`)
+
 /** 批量建任务：把拆单结果一键写入流程表 */
 export const bulkCreateTasks = (tasks) =>
   json(`${BASE}/tasks/bulk`, { method: 'POST', body: JSON.stringify({ tasks }) })

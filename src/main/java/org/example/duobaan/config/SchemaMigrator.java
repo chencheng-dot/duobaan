@@ -36,6 +36,7 @@ public class SchemaMigrator {
                 return;
             }
             migrateTaskTable(dbName);
+            migrateChatMessageTable(dbName);
         } catch (Exception e) {
             // 升级失败不阻止启动（全新数据库列已在 schema.sql 建好，这里只是兼容旧库）
             log.warn("[SchemaMigrator] 迁移过程发生异常，跳过（全新库可忽略）：{}", e.getMessage());
@@ -76,6 +77,15 @@ public class SchemaMigrator {
         if (!indexExists(dbName, "task", "idx_task_deleted_at")) {
             jdbc.execute("ALTER TABLE `task` ADD KEY `idx_task_deleted_at` (`deleted_at`)");
             log.info("[SchemaMigrator] idx_task_deleted_at 索引已添加");
+        }
+    }
+
+    /** chat_message 表：补齐复合索引 idx_chat_mode_created，让按 mode + 时间倒序/正序走索引 */
+    private void migrateChatMessageTable(String dbName) {
+        if (!indexExists(dbName, "chat_message", "idx_chat_mode_created")) {
+            jdbc.execute("ALTER TABLE `chat_message` "
+                    + "ADD KEY `idx_chat_mode_created` (`mode`, `created_at` DESC, `id` DESC)");
+            log.info("[SchemaMigrator] chat_message.idx_chat_mode_created 索引已添加");
         }
     }
 

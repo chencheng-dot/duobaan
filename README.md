@@ -286,8 +286,10 @@ npm run build         # 产物输出到 src/main/resources/static/
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/llm/chat/stream` | SSE 流式对话（delta/done/error 事件） |
+| POST | `/api/llm/chat/stream` | SSE 流式对话（delta/done/error 事件），对话双方自动入库 chat_message |
+| POST | `/api/llm/chat` | 非流式对话（兼容），消息同样持久化 |
 | POST | `/api/llm/parse-tasks` | 自然语言拆单为任务列表 |
+| GET  | `/api/llm/history?mode=WORK\|DOPAMINE&limit=50` | 拉取最近 N 条对话历史（时间正序），前端 ChatPanel 挂载时调用恢复上次对话 |
 
 ### 任务
 

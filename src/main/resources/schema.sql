@@ -46,13 +46,15 @@ CREATE TABLE IF NOT EXISTS `api_profile` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 对话记录，区分办公/多巴胺模式
+-- 每种模式保留最近 MAX_HISTORY_PER_MODE（默认 50）条，超出自动删除最旧的
 CREATE TABLE IF NOT EXISTS `chat_message` (
     `id`         BIGINT       NOT NULL AUTO_INCREMENT,
     `mode`       ENUM('DOPAMINE','WORK') NOT NULL,
     `chat_role`  VARCHAR(20)  NOT NULL,
     `content`    MEDIUMTEXT   NOT NULL,
     `created_at` DATETIME(6)  NOT NULL,
-    PRIMARY KEY (`id`)
+    PRIMARY KEY (`id`),
+    KEY `idx_chat_mode_created` (`mode`, `created_at` DESC, `id` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 系统配置表：key-value 结构，存放大模型提供商等可运行时修改的配置
