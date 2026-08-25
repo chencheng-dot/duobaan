@@ -1,5 +1,6 @@
 package org.example.duobaan.service;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,12 +18,17 @@ import org.example.duobaan.model.dto.TaskSummary;
 import org.example.duobaan.repository.TaskHistoryRepository;
 import org.example.duobaan.repository.TaskRepository;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
  * 流程表服务：CRUD、状态流转、今日↔明日迁移、上交小结。
+ *
+ * 零点自动转组策略：
+ *  - 每天 00:00 通过 @Scheduled 把所有 TOMORROW 组任务转回 TODAY
+ *  - 同时在 list() / contextSummary() 等查询入口懒加载触发，防止夜间停机错过零点
  */
 @Service
 public class TaskService {
@@ -37,7 +43,50 @@ public class TaskService {
         this.historyRepo = historyRepo;
     }
 
+    /** 上一次执行 rollover 的日期，避免同一次启动内反复触发 */
+    private volatile LocalDate lastRolloverDate;
+
+    /**
+     * 零点转组：把「明日」分组的任务全部转到「今日」。
+     * 每天凌晨 0:05 执行（延迟 5 秒避免整点竞争）。
+     */
+    @Scheduled(cron = "0 5 0 * * *")
+    @Transactional
+    public void rolloverTomorrowToToday() {
+        LocalDate today = LocalDate.now();
+        if (today.equals(lastRolloverDate)) return;
+        lastRolloverDate = today;
+        List<Task> tomorrowTasks = repo.findByGroupOrderByCreatedAtAsc(TaskGroup.TOMORROW);
+        int count = 0;
+        for (Task t : tomorrowTasks) {
+            t.setGroup(TaskGroup.TODAY);
+            count++;
+        }
+        if (count > 0) {
+            repo.saveAll(tomorrowTasks);
+        }
+    }
+
+    /**
+     * 懒加载转组：每次查询前调用，确保即使夜间停机，重启后也能立即完成转组。
+     * 仅当日历日变化时触发。
+     */
+    private void ensureRollover() {
+        LocalDate today = LocalDate.now();
+        if (!today.equals(lastRolloverDate)) {
+            lastRolloverDate = today;
+            List<Task> tomorrowTasks = repo.findByGroupOrderByCreatedAtAsc(TaskGroup.TOMORROW);
+            if (!tomorrowTasks.isEmpty()) {
+                for (Task t : tomorrowTasks) {
+                    t.setGroup(TaskGroup.TODAY);
+                }
+                repo.saveAll(tomorrowTasks);
+            }
+        }
+    }
+
     public List<Task> list(TaskGroup group) {
+        ensureRollover();
         return repo.findByGroupOrderByCreatedAtAsc(group);
     }
 
@@ -147,6 +196,7 @@ public class TaskService {
 
     /** 供大模型上下文用的流程表摘要 */
     public String contextSummary() {
+        ensureRollover();
         List<Task> today = repo.findByGroupOrderByCreatedAtAsc(TaskGroup.TODAY);
         List<Task> tomorrow = repo.findByGroupOrderByCreatedAtAsc(TaskGroup.TOMORROW);
         StringBuilder sb = new StringBuilder();
