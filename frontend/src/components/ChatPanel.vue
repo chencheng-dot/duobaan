@@ -434,6 +434,9 @@ async function doImage(prompt) {
     if (res.status === 'succeeded') {
       bubble.content = '🎨 生成完成（点击图片可新标签页打开）'
       bubble.rich = { kind: 'IMAGE', payload: res, text: bubble.content }
+    } else if (res.status === 'pending') {
+      bubble.content = '⏳ 图片生成中（异步任务已提交，约 10~30 秒）…'
+      bubble.rich = { kind: 'IMAGE', payload: res, text: bubble.content }
     } else {
       bubble.content = res.error || '生图失败'
       bubble.degraded = true
@@ -691,17 +694,22 @@ function sendDisabled() {
         </div>
 
         <!-- 富内容：图片 -->
-        <div v-if="m.rich && m.rich.kind === 'IMAGE' && m.rich.payload && m.rich.payload.items" class="rich-grid">
-          <a
-            v-for="(it, j) in m.rich.payload.items"
-            :key="j"
-            :href="imageSrc(it)"
-            target="_blank"
-            rel="noreferrer"
-            class="rich-img"
-          >
-            <img :src="imageSrc(it)" :alt="it.revisedPrompt || '生成的图片'" />
-          </a>
+        <div v-if="m.rich && m.rich.kind === 'IMAGE'" class="rich-block">
+          <div v-if="m.rich.payload && m.rich.payload.items && m.rich.payload.items.length" class="rich-grid">
+            <a
+              v-for="(it, j) in m.rich.payload.items"
+              :key="j"
+              :href="imageSrc(it)"
+              target="_blank"
+              rel="noreferrer"
+              class="rich-img"
+            >
+              <img :src="imageSrc(it)" :alt="it.revisedPrompt || '生成的图片'" />
+            </a>
+          </div>
+          <div v-else-if="m.rich.payload && m.rich.payload.status === 'pending'" class="muted" style="font-size:12px">
+            ⏳ 图片仍在异步处理中（task_id 已提交），稍后可在相同聊天中重试获取。
+          </div>
         </div>
 
         <!-- 富内容：TTS 音频 -->
