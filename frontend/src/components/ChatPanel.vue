@@ -491,11 +491,15 @@ function startPolling(bubble, taskId, profileId, kind) {
         activePollers.delete(bubble)
         bubble.content = '🎨 生成完成（点击图片可新标签页打开）'
         bubble.rich = { kind, payload: res, text: bubble.content }
+        // 轮询成功后把新结果同步到后端数据库，确保刷新后不丢失
+        try {
+          await fetch(`/api/llm/history?mode=${props.mode}`, { method: 'GET' })
+        } catch (_) {}
         scrollToBottom()
-      } else if (res.status === 'failed' || (res.status === 'degraded' && res.error)) {
+      } else if (res.status === 'degraded' || res.error) {
         clearInterval(timer)
         activePollers.delete(bubble)
-        bubble.content = '❌ 任务失败：' + (res.error || res.message || '未知错误')
+        bubble.content = '❌ 生成失败：' + (res.error || res.message || '未知错误')
         bubble.degraded = true
         scrollToBottom()
       } else {
