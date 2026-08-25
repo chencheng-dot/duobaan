@@ -101,8 +101,9 @@ public final class UrlSanitizer {
         //    最多循环 3 次：因为偶尔有「/compatible-mode/v1/videos/generations」这种嵌套后缀
         for (int i = 0; i < 3; i++) {
             java.util.regex.Matcher m = ACTION_SUFFIX.matcher(s);
-            // 只匹配末尾段
-            if (m.find(s.lastIndexOf('/') >= 0 ? 0 : -1) && m.end() == s.length()) {
+            // 只匹配末尾段；注意 lastIndexOf 可能返回 -1（如天气 Host 无 /），find 起点 ≥ 0
+            int startFrom = Math.max(0, s.lastIndexOf('/'));
+            if (m.find(startFrom) && m.end() == s.length()) {
                 s = s.substring(0, m.start());
             } else {
                 break;
