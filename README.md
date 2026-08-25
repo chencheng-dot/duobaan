@@ -364,6 +364,25 @@ MIT
 
 ## 版本更新记录
 
+### v1.0.0 🚀（初始版本）
+
+**核心功能上线**
+
+- 办公流程表：今日/明日分组任务管理，CRUD + 状态流转（待办/进行中/完成/已上交）
+- 多巴胺推荐：根据心情/天气/口味/用餐方式推荐美食
+- 实时天气：和风天气 API 接入，展示当前天气 + 体感温度
+- 实时时间：顶栏展示时间/星期/时段
+- 基础大模型对话：接入 LLM 完成办公问答与美食推荐
+- 双页模式：办公模式 / 多巴胺模式左侧一键切换
+
+**技术架构**
+
+- 后端：Spring Boot + JPA + H2 + Thymeleaf
+- 前端：原生 HTML/CSS/JS 模板渲染
+- 数据库：H2 嵌入式数据库
+
+---
+
 ### v2.0.0 🎨
 
 本次更新集中在 UI 美化、可视化增强与大模型接入体验优化：
@@ -651,6 +670,74 @@ MIT
 1. 图片模型请到「设置 → 图片模型」把模型 ID 改成 `wanx2.1-t2i-turbo`（推荐）或 `wanx1.5-t2i-plus`；**不要再填 wan*-t2v-**
 2. 语音模型请到「设置 → 语音模型」把模型 ID 从 `sambert-zhide-v1` 换成 `cosyvoice-v3-flash`（推荐）或 `qwen-audio-3.0-tts-flash` 即可正常 HTTP 朗读
 3. 图片/视频/语音 Tab 所有 404 已彻底消除；欠费请到 [百炼控制台](https://dashscope.console.aliyun.com/) 充值后使用
+
+---
+
+### v3.3.4 ⏳ 修复：异步图片/视频任务持久化 + 自动轮询 + 零点自动转组
+
+**三大问题一次解决**
+
+| # | 问题 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | 刷新后图片消失 | `persistAsAssistant()` 只保存 `succeeded` 状态，pending 消息不入库 | 同时保存 `pending` 状态的富媒体 JSON 到数据库 |
+| 2 | 图片永远不出来 | Dashscope 异步任务提交后没有轮询机制 | 每 5 秒自动轮询任务状态，最多 12 次（60 秒） |
+| 3 | 任务过零点不转组 | Task 的 `group` 字段是静态存储，无日期变更自动转组 | 定时任务（零点 00:05）+ 懒加载（每次查询时检查）双保险 |
+
+**1. 异步任务持久化 + 自动轮询**
+
+- **MediaResponse 新增 `profileId` 字段**：前端可追踪用哪个 profile 轮询 Dashscope 任务状态
+- **MediaService 新增 `pollTask()` 方法**：GET `https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}` 查询异步任务状态
+- **MediaController 新增 `GET /api/media/poll-task?taskId&profileId&kind` 接口**：前端轮询入口
+- **前端 ChatPanel.vue 自动轮询**：
+  - `doImage()` / `doVideo()` 提交后检测到 `pending` 状态 + `profileId` 时自动启动轮询
+  - `startPolling()` 每 5 秒调用 `/poll-task`，成功后更新气泡为图片/视频，失败显示错误
+  - `onMounted()` 恢复 pending 消息时自动重启轮询（刷新不丢进度）
+- **pending 消息入库**：`persistAsAssistant()` 现在同时保存 `succeeded` 和 `pending` 状态的富媒体 JSON，刷新后能恢复任务状态
+
+**2. 零点自动转组（明日 → 今日）**
+
+- **定时任务**：`@Scheduled(cron = "0 5 0 * * *")` 每天 00:05 执行，把所有 TOMORROW 组任务转到 TODAY
+- **懒加载保险**：`ensureRollover()` 在 `list()` / `contextSummary()` 等查询入口调用，即使用户几天没启动后端，重启后也能立即完成转组
+- **启动类启用调度**：`DuobaanApplication.java` 添加 `@EnableScheduling`
+
+**3. 错误判断修复**
+
+- 前端轮询失败判断从 `res.status === 'failed'` 改为 `res.status === 'degraded' || res.error`（后端 MediaResponse 使用 `degraded` 状态而非 `failed`）
+- 轮询成功后调用后端同步接口（预留后续扩展）
+
+**接口测试验证（v3.3.4 实测）**
+
+| 接口 | 方法 | 测试结果 |
+|------|------|----------|
+| `/api/tasks?group=TODAY` | GET | ✅ 1 条任务（转组生效） |
+| `/api/tasks` | POST | ✅ 创建任务 id=9 |
+| `/api/config/profiles?type=LLM` | GET | ✅ 1 个配置 |
+| `/api/config/profiles?type=IMAGE` | GET | ✅ 1 个配置 |
+| `/api/config/profiles?type=AUDIO` | GET | ✅ 1 个配置 |
+| `/api/config/profiles?type=VIDEO` | GET | ✅ 1 个配置 |
+| `/api/config/profiles?type=WEATHER` | GET | ✅ 1 个配置 |
+| `/api/media/image` | POST | ✅ status=pending（异步任务提交成功） |
+| `/api/media/speech` | POST | ✅ status=succeeded（语音合成成功） |
+| `/api/media/video` | POST | ✅ status=pending（异步任务提交成功） |
+| `/api/media/poll-task` | GET | ✅ status=degraded（测试用 task_id 不存在，返回预期错误） |
+| `/api/llm/history?mode=WORK` | GET | ✅ 50 条历史消息 |
+| `/api/llm/parse-tasks` | POST | ✅ 解析成功 |
+| `/api/config/weather` | GET | ✅ 天气配置正常 |
+| `/api/time/now` | GET | ✅ 时间接口正常 |
+| `/api/config/providers` | GET | ✅ 5 个提供商预设 |
+
+**文件变更**
+
+| 文件 | 变更 |
+|------|------|
+| `MediaResponse.java` | 新增 `profileId` 字段（record 第10个组件），新增多个带 profileId 的工厂方法 |
+| `MediaService.java` | 新增 `pollTask()` 方法 + 所有 pending 返回带 profileId |
+| `ApiProfileService.java` | 新增 `getPlain(Long id)` 方法获取完整实体（含 API Key） |
+| `MediaController.java` | pending 消息入库 + 新增 `/poll-task` 接口 |
+| `TaskService.java` | 新增 `rolloverTomorrowToToday()` + `ensureRollover()` 零点自动转组 |
+| `DuobaanApplication.java` | 添加 `@EnableScheduling` 启用定时任务 |
+| `ChatPanel.vue` | 自动轮询（5秒/次，最多12次）+ 刷新后恢复 pending 轮询 + 错误判断修复 |
+| `api/index.js` | 新增 `pollTask()` API 调用 |
 
 ---
 
