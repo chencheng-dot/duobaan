@@ -232,22 +232,34 @@ public class MediaService {
                 ? p.getTimeoutSeconds() : DEFAULT_TIMEOUT_AUDIO;
         final ProviderVendor vendor = vendorOf(p);
         try {
-            // —— Dashscope（Sambert / CosyVoice / Qwen-Audio-TTS）原生分支：compatible-mode/v1 没有 /audio/speech ——
+            // —— Dashscope TTS 按模型系列路由（endpoint/body 格式完全不同）——
             if (vendor == ProviderVendor.DASHSCOPE) {
-                String model = orModel(p.getModel(), "cosyvoice-v3-flash");
-                // Sambert 仅支持 WebSocket（wss://.../api-ws/v1/inference），无 HTTP API，直接给友好降级建议
-                if (model.toLowerCase().startsWith("sambert-")) {
+                String model = orModel(p.getModel(), "qwen3-tts-flash");
+                String ml = model.toLowerCase();
+                // Sambert 仅支持 WebSocket（wss://.../api-ws/v1/inference），无 HTTP API
+                if (ml.startsWith("sambert-")) {
                     return MediaResponse.error("AUDIO_TTS",
-                            "ℹ️ Dashscope Sambert 系列模型（如 sambert-zhide-v1/sambert-zhichu-v1）仅提供 WebSocket 接口，" +
-                                    "暂时无法通过 HTTP API 调用。请到「设置 → 语音模型」把模型 ID 换成支持 HTTP 的 CosyVoice（推荐 cosyvoice-v3-flash）" +
-                                    "或 Qwen-Audio-TTS（如 qwen-audio-3.0-tts-flash）即可正常使用。");
+                            "ℹ️ Dashscope Sambert 系列模型仅提供 WebSocket 实时接口，" +
+                                    "暂时无法通过 HTTP API 调用。请到「设置 → 语音模型」把模型 ID 换成支持 HTTP 的" +
+                                    " **qwen3-tts-flash**（基础版）或 **qwen3-tts-instruct-flash**（支持指令控制）即可正常使用。");
                 }
+                // CosyVoice / Qwen-Audio-TTS 需要 workspace 专属域名（{WorkspaceId}.cn-beijing.maas.aliyuncs.com）
+                if (ml.startsWith("cosyvoice") || ml.startsWith("qwen-audio")) {
+                    return MediaResponse.error("AUDIO_TTS",
+                            "ℹ️ " + model + " 系列需要配置 Workspace 专属域名才能通过 HTTP 调用。" +
+                                    "请到 [百炼控制台](https://dashscope.console.aliyun.com/) 获取你的 Workspace ID，" +
+                                    "然后在「设置 → 语音模型 → API Base URL」填入 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`。" +
+                                    "推荐直接使用 **qwen3-tts-flash**（兼容 dashscope.aliyuncs.com 通用域名）。");
+                }
+                // Qwen-TTS (qwen3-tts-*) 走 multimodal-generation/generation，请求体格式不同
+                if (ml.startsWith("qwen3-tts")) {
+                    return qwen3TtsCall(p, model, input, speed);
+                }
+                // 兜底：所有其他 Dashscope TTS 模型走 SpeechSynthesizer（通用 endpoint）
                 String outFormat = dashscopeAudioFormat(StringUtils.hasText(format) ? format : "mp3");
                 int sampleRate = 22050;
-                String vol = StringUtils.hasText(voice) ? voice : null; // 当说话人/音色透传
+                String vol = StringUtils.hasText(voice) ? voice : null;
                 double rateVal = speed == null ? 1.0 : speed;
-                // 百炼官方非实时 TTS HTTP API：POST /api/v1/services/audio/tts/SpeechSynthesizer
-                // 参数约定（与文生图不同）：format/sample_rate/voice/rate 等全部放在 input 对象内，不是 parameters
                 final String endpoint = DASHSCOPE_ROOT + "api/v1/services/audio/tts/SpeechSynthesizer";
                 var node = objectMapper.createObjectNode();
                 node.put("model", model);
@@ -268,31 +280,7 @@ public class MediaService {
                         .build();
                 HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 if (resp.statusCode() != 200) return httpFail("AUDIO_TTS", resp.statusCode(), resp.body(), vendor);
-                JsonNode root = objectMapper.readTree(resp.body());
-                String audioUrl = root.path("output").path("audio_url").asText(null);
-                if (!StringUtils.hasText(audioUrl) && root.path("output").has("results")) {
-                    for (JsonNode r : root.path("output").path("results")) {
-                        audioUrl = r.path("audio_url").asText(null);
-                        if (StringUtils.hasText(audioUrl)) break;
-                    }
-                }
-                if (StringUtils.hasText(audioUrl)) {
-                    // 直接拉取音频二进制 → TTS 响应
-                    byte[] bytes = httpClient.send(
-                            HttpRequest.newBuilder().uri(URI.create(audioUrl)).timeout(Duration.ofSeconds(timeout)).GET().build(),
-                            HttpResponse.BodyHandlers.ofByteArray()).body();
-                    return MediaResponse.tts(bytes, mimeForAudio(outFormat), "speech." + outFormat);
-                }
-                String taskId = root.path("output").path("task_id").asText(null);
-                String taskStatus = root.path("output").path("task_status").asText(null);
-                if (StringUtils.hasText(taskId)) {
-                    // 异步 pending：给 TTS 响应 message，前端 ChatPanel 会显示状态
-                    return MediaResponse.ttsPending(
-                            "Dashscope 语音合成任务已提交（task_id=" + taskId + ", status=" + or(taskStatus, "PENDING") + "），几秒后请点击下方的刷新按钮获取音频。");
-                }
-                String err = root.path("message").asText(null);
-                return MediaResponse.error("AUDIO_TTS",
-                        StringUtils.hasText(err) ? "模型返回错误：" + err : "Dashscope 未返回音频地址（status=" + taskStatus + "）");
+                return parseTtsResponse(resp.body(), outFormat, model);
             }
 
             final String action = "audio/speech";
@@ -514,6 +502,84 @@ public class MediaService {
         }
     }
 
+    // ================================ Dashscope TTS helpers ================================
+
+    /**
+     * Qwen-TTS (qwen3-tts-*) 系列专用：endpoint 不同，请求体格式不同。
+     * 文档：POST https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+     * Body: {model, input:{text, voice, language_type}}
+     * 响应: output.audio.url → 直接返回音频 URL
+     */
+    private MediaResponse qwen3TtsCall(ApiProfile p, String model, String text, Double speed) {
+        int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0
+                ? p.getTimeoutSeconds() : DEFAULT_TIMEOUT_AUDIO;
+        final String endpoint = DASHSCOPE_ROOT + "api/v1/services/aigc/multimodal-generation/generation";
+        var node = objectMapper.createObjectNode();
+        node.put("model", model);
+        var inObj = node.putObject("input");
+        inObj.put("text", text);
+        inObj.put("voice", "Cherry"); // 默认女声 Cherry，用户可在未来前端选择
+        inObj.put("language_type", "Chinese");
+        String body = objectMapper.writeValueAsString(node);
+        try {
+            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(timeout))
+                    .header("Authorization", "Bearer " + p.getApiKey())
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                    .build();
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (resp.statusCode() != 200) return httpFail("AUDIO_TTS", resp.statusCode(), resp.body(), ProviderVendor.DASHSCOPE);
+            JsonNode root = objectMapper.readTree(resp.body());
+            String audioUrl = root.path("output").path("audio").path("url").asText(null);
+            if (!StringUtils.hasText(audioUrl)) {
+                audioUrl = root.path("output").path("audio_url").asText(null);
+            }
+            if (StringUtils.hasText(audioUrl)) {
+                byte[] bytes = httpClient.send(
+                        HttpRequest.newBuilder().uri(URI.create(audioUrl)).timeout(Duration.ofSeconds(timeout)).GET().build(),
+                        HttpResponse.BodyHandlers.ofByteArray()).body();
+                return MediaResponse.tts(bytes, "audio/mpeg", "speech.mp3");
+            }
+            String err = root.path("message").asText(null);
+            return MediaResponse.error("AUDIO_TTS",
+                    StringUtils.hasText(err) ? "模型返回错误：" + err : "Qwen-TTS 未返回音频地址");
+        } catch (Exception e) {
+            return MediaResponse.error("AUDIO_TTS", friendlyErr("Qwen-TTS", e));
+        }
+    }
+
+    /** 统一解析 Dashscope TTS 响应（SpeechSynthesizer 系列） */
+    private MediaResponse parseTtsResponse(String body, String outFormat, String model) {
+        try {
+            JsonNode root = objectMapper.readTree(body);
+            String audioUrl = root.path("output").path("audio_url").asText(null);
+            if (!StringUtils.hasText(audioUrl) && root.path("output").has("results")) {
+                for (JsonNode r : root.path("output").path("results")) {
+                    audioUrl = r.path("audio_url").asText(null);
+                    if (StringUtils.hasText(audioUrl)) break;
+                }
+            }
+            if (StringUtils.hasText(audioUrl)) {
+                byte[] bytes = httpClient.send(
+                        HttpRequest.newBuilder().uri(URI.create(audioUrl)).timeout(Duration.ofSeconds(30)).GET().build(),
+                        HttpResponse.BodyHandlers.ofByteArray()).body();
+                return MediaResponse.tts(bytes, mimeForAudio(outFormat), "speech." + outFormat);
+            }
+            String taskId = root.path("output").path("task_id").asText(null);
+            String taskStatus = root.path("output").path("task_status").asText(null);
+            if (StringUtils.hasText(taskId)) {
+                return MediaResponse.ttsPending(
+                        "语音合成任务已提交（task_id=" + taskId + ", status=" + or(taskStatus, "PENDING") + "），几秒后请点击刷新获取音频。");
+            }
+            String err = root.path("message").asText(null);
+            return MediaResponse.error("AUDIO_TTS",
+                    StringUtils.hasText(err) ? "模型返回错误：" + err : "未返回音频地址");
+        } catch (Exception e) {
+            return MediaResponse.error("AUDIO_TTS", "解析 TTS 响应失败：" + e.getMessage());
+        }
+    }
+
     /** Dashscope 视频 size：按比例（16:9 / 9:16 / 1:1）映射到官方允许的像素尺寸 */
     private static String dashscopeVideoSize(String ratio) {
         return switch (ratio == null ? "" : ratio.trim()) {
@@ -625,6 +691,7 @@ public class MediaService {
         if (model.startsWith("wanx") || model.startsWith("wan-") || model.startsWith("wan2.")
                 || model.startsWith("sambert-") || model.startsWith("cosyvoice")
                 || model.startsWith("qwen-audio") || model.startsWith("qwen-image")
+                || model.startsWith("qwen3-tts")
                 || model.startsWith("paraformer") || model.startsWith("seacosformer")
                 || model.startsWith("qwen-") && model.contains("tts")) {
             return ProviderVendor.DASHSCOPE;
