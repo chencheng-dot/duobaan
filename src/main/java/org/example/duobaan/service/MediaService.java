@@ -89,9 +89,48 @@ public class MediaService {
             // —— Dashscope（万相）原生分支：compatible-mode/v1 不支持 /images/generations，必须用原生 aigc 路径 ——
             if (vendor == ProviderVendor.DASHSCOPE) {
                 String model = orModel(p.getModel(), "wanx2.1-t2i-turbo");
+                String ml = model.toLowerCase();
+                // —— 千问图片系列 (qwen-image-*)：不同的原生 endpoint ——
+                // 千问图片走 /api/v1/services/aigc/image-generation/generation，与万相 /text2image/image-synthesis 不同
+                boolean isQwenImage = ml.startsWith("qwen-image");
+                if (isQwenImage) {
+                    // 千问图片原生接口
+                    final String endpoint = DASHSCOPE_ROOT + "api/v1/services/aigc/image-generation/generation";
+                    String sizeParam = dashscopeImageSize(StringUtils.hasText(size) ? size : "1024x1024");
+                    int nVal = (n == null || n < 1) ? 1 : Math.min(n, 4);
+                    var node = objectMapper.createObjectNode();
+                    node.put("model", model);
+                    var input = node.putObject("input");
+                    input.put("prompt", prompt);
+                    var params = node.putObject("parameters");
+                    params.put("size", sizeParam);
+                    params.put("n", nVal);
+                    String body = objectMapper.writeValueAsString(node);
+                    HttpRequest req = HttpRequest.newBuilder().uri(URI.create(endpoint))
+                            .timeout(Duration.ofSeconds(timeout))
+                            .header("Authorization", "Bearer " + p.getApiKey())
+                            .header("X-DashScope-Async", "enable")
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                            .build();
+                    HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                    if (resp.statusCode() != 200) return httpFail("IMAGE", resp.statusCode(), resp.body(), vendor);
+                    JsonNode root = objectMapper.readTree(resp.body());
+                    String taskId = root.path("output").path("task_id").asText(null);
+                    List<MediaItem> items = collectDashscopeResults(root.path("output").path("results"));
+                    if (items.isEmpty() && StringUtils.hasText(taskId)) {
+                        return MediaResponse.image(List.of(), "pending",
+                                "千问图片任务已提交（task_id=" + taskId + "），稍后刷新即可看到结果。");
+                    }
+                    if (items.isEmpty()) {
+                        String err = root.path("message").asText(null);
+                        return MediaResponse.error("IMAGE",
+                                StringUtils.hasText(err) ? "模型返回错误：" + err : "千问图片未返回图片地址");
+                    }
+                    return MediaResponse.image(items);
+                }
                 // —— 防呆：把视频模型（t2v=text-to-video）填到「图片模型」配置里的情况 ——
                 // 例如 wan2.7-t2v-2026-06-12 / wan2.1-t2v-turbo 等：这些只能走视频合成接口，文生图接口会 404/url error
-                String ml = model.toLowerCase();
                 if (ml.contains("-t2v-") || ml.startsWith("wan-t2v") || ml.startsWith("wan2.") && ml.contains("t2v")) {
                     return MediaResponse.error("IMAGE",
                             "❌ 检测到模型 ID `" + model + "` 是「文生视频」模型（t2v），不能用于图片生成。" +
@@ -585,8 +624,9 @@ public class MediaService {
         // 第二层（兜底）：模型ID前缀 — 用户选了「自定义」但填了 Dashscope 模型时依然能正确分流
         if (model.startsWith("wanx") || model.startsWith("wan-") || model.startsWith("wan2.")
                 || model.startsWith("sambert-") || model.startsWith("cosyvoice")
-                || model.startsWith("qwen-audio") || model.startsWith("paraformer")
-                || model.startsWith("seacosformer") || model.startsWith("qwen-") && model.contains("tts")) {
+                || model.startsWith("qwen-audio") || model.startsWith("qwen-image")
+                || model.startsWith("paraformer") || model.startsWith("seacosformer")
+                || model.startsWith("qwen-") && model.contains("tts")) {
             return ProviderVendor.DASHSCOPE;
         }
         if (provider.contains("KLING") || provider.contains("KUAISHOU") || provider.contains("可灵")
