@@ -9,6 +9,7 @@ import {
   generateSpeech,
   transcribeAudio,
   generateVideo,
+  pollTask,
   getTasks,
   migrateTask,
   patchTask,
@@ -89,6 +90,17 @@ onMounted(async () => {
           streaming: false
         }
       })
+      // 恢复 pending 状态的富媒体消息的自动轮询
+      for (const bubble of messages.value) {
+        if (bubble.rich && bubble.rich.payload && bubble.rich.payload.status === 'pending'
+            && bubble.rich.payload.profileId && bubble.rich.payload.message) {
+          const taskId = extractTaskId(bubble.rich.payload.message)
+          if (taskId) {
+            bubble.content = '⏳ 继续生成中（页面已刷新，恢复轮询）…'
+            startPolling(bubble, taskId, bubble.rich.payload.profileId, bubble.rich.kind)
+          }
+        }
+      }
       await scrollToBottom()
     }
   } catch (e) {
@@ -437,6 +449,11 @@ async function doImage(prompt) {
     } else if (res.status === 'pending') {
       bubble.content = '⏳ 图片生成中（异步任务已提交，约 10~30 秒）…'
       bubble.rich = { kind: 'IMAGE', payload: res, text: bubble.content }
+      // 自动轮询 Dashscope 异步任务（每 5 秒查一次，最多 12 次 = 60 秒）
+      if (res.profileId && res.message) {
+        const taskId = extractTaskId(res.message)
+        if (taskId) startPolling(bubble, taskId, res.profileId, 'IMAGE')
+      }
     } else {
       bubble.content = res.error || '生图失败'
       bubble.degraded = true
@@ -449,6 +466,53 @@ async function doImage(prompt) {
     loading.value = false
     scrollToBottom()
   }
+}
+
+// 从 Dashscope pending 消息中提取 task_id
+function extractTaskId(message) {
+  if (!message) return null
+  const m = message.match(/task_id[=:]\s*([a-f0-9-]+)/i)
+  return m ? m[1] : null
+}
+
+// 自动轮询异步任务状态
+const activePollers = new Map() // bubble -> timer
+
+function startPolling(bubble, taskId, profileId, kind) {
+  if (activePollers.has(bubble)) return
+  let count = 0
+  const maxAttempts = 12
+  const timer = setInterval(async () => {
+    count++
+    try {
+      const res = await pollTask({ taskId, profileId, kind })
+      if (res.status === 'succeeded' && res.items && res.items.length) {
+        clearInterval(timer)
+        activePollers.delete(bubble)
+        bubble.content = '🎨 生成完成（点击图片可新标签页打开）'
+        bubble.rich = { kind, payload: res, text: bubble.content }
+        scrollToBottom()
+      } else if (res.status === 'failed' || (res.status === 'degraded' && res.error)) {
+        clearInterval(timer)
+        activePollers.delete(bubble)
+        bubble.content = '❌ 任务失败：' + (res.error || res.message || '未知错误')
+        bubble.degraded = true
+        scrollToBottom()
+      } else {
+        // 仍在处理中，更新提示
+        bubble.content = `⏳ 图片生成中（第 ${count} 次查询，状态：${res.message || res.status}）…`
+      }
+    } catch (e) {
+      // 轮询出错不停止，继续重试
+    }
+    if (count >= maxAttempts) {
+      clearInterval(timer)
+      activePollers.delete(bubble)
+      bubble.content = '⏰ 生成超时（60秒），请稍后刷新页面查看结果'
+      scrollToBottom()
+    }
+  }, 5000)
+  activePollers.set(bubble, timer)
 }
 
 // ================= TTS 文生语音 =================
@@ -535,8 +599,13 @@ async function doVideo(prompt) {
       bubble.content = '🎬 视频生成完成'
       bubble.rich = { kind: 'VIDEO', payload: res, text: bubble.content }
     } else if (res.status === 'pending') {
-      bubble.content = '⏳ 视频仍在排队处理中，请稍后刷新：' + (res.error || '')
+      bubble.content = '⏳ 视频仍在排队处理中（异步任务已提交，请稍候）'
       bubble.rich = { kind: 'VIDEO', payload: res, text: bubble.content }
+      // 视频异步任务自动轮询
+      if (res.profileId && res.message) {
+        const taskId = extractTaskId(res.message)
+        if (taskId) startPolling(bubble, taskId, res.profileId, 'VIDEO')
+      }
     } else {
       bubble.content = res.error || '生成失败'
       bubble.degraded = true

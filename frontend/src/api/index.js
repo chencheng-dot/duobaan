@@ -154,5 +154,9 @@ export const transcribeAudio = async (file, mode = 'WORK') => {
 export const generateVideo = (body) =>
   json(`${BASE}/media/video`, { method: 'POST', body: JSON.stringify(body) })
 
+/** Dashscope 异步任务轮询：{taskId, profileId, kind} */
+export const pollTask = ({ taskId, profileId, kind }) =>
+  json(`${BASE}/media/poll-task?taskId=${encodeURIComponent(taskId)}&profileId=${profileId}&kind=${kind}`)
+
 // === 我的：任务历史 ===
 export const getMineHistory = () => json(`${BASE}/tasks/mine`)

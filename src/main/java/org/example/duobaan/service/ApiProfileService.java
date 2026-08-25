@@ -67,6 +67,11 @@ public class ApiProfileService {
                 .map(ApiProfileService::cleanForUse);
     }
 
+    /** 根据 ID 获取带明文 Key 的实体（仅后端内部使用） */
+    public Optional<ApiProfile> getPlain(Long id) {
+        return repo.findById(id).map(ApiProfileService::cleanForUse);
+    }
+
     // ========================= 写操作：create / update / setActive / delete ========================
 
     @Transactional

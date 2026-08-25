@@ -1,5 +1,6 @@
 package org.example.duobaan.controller;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import org.example.duobaan.model.ChatMode;
@@ -7,6 +8,7 @@ import org.example.duobaan.model.dto.MediaResponse;
 import org.example.duobaan.service.ChatService;
 import org.example.duobaan.service.MediaService;
 import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -87,6 +89,16 @@ public class MediaController {
         return res;
     }
 
+    // ========================= Dashscope 异步任务轮询 =========================
+    /** 前端轮询 Dashscope 异步任务：传 task_id + profile_id，返回最新状态 */
+    @GetMapping("/poll-task")
+    public MediaResponse pollTask(
+            @RequestParam String taskId,
+            @RequestParam Long profileId,
+            @RequestParam(defaultValue = "IMAGE") String kind) {
+        return mediaService.pollTask(taskId, profileId, kind);
+    }
+
     // ================================= 内部辅助 =================================
     /** 把多模态生成结果作为一条「助手富内容消息」写入 chat_message。
      *  content 格式：富媒体头部 + JSON（小图/TTS/视频 可被前端还原为 img/audio/video 标签） */
@@ -95,13 +107,14 @@ public class MediaController {
         ChatMode cm = parseMode(modeStr);
         String content = fallbackText;
         try {
-            // 仅当成功时把富内容 JSON 附加到消息里，便于前端渲染
-            if ("succeeded".equalsIgnoreCase(resp.status())) {
-                Map<String, Object> rich = Map.of(
-                        "kind", kind,
-                        "payload", objectMapper.convertValue(resp, Object.class),
-                        "text", fallbackText
-                );
+            // 成功 / pending 都要保存富内容 JSON，便于前端渲染和刷新后恢复
+            // degraded/error 状态只保存纯文本提示（无富媒体数据）
+            String status = resp.status();
+            if ("succeeded".equalsIgnoreCase(status) || "pending".equalsIgnoreCase(status)) {
+                Map<String, Object> rich = new java.util.HashMap<>();
+                rich.put("kind", kind);
+                rich.put("payload", objectMapper.convertValue(resp, Object.class));
+                rich.put("text", fallbackText);
                 content = "%%RICH_MEDIA%%" + objectMapper.writeValueAsString(rich);
             }
         } catch (Exception ignore) {

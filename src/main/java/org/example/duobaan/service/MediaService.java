@@ -120,7 +120,7 @@ public class MediaService {
                     List<MediaItem> items = collectDashscopeResults(root.path("output").path("results"));
                     if (items.isEmpty() && StringUtils.hasText(taskId)) {
                         return MediaResponse.image(List.of(), "pending",
-                                "千问图片任务已提交（task_id=" + taskId + "），稍后刷新即可看到结果。");
+                                "千问图片任务已提交（task_id=" + taskId + "），稍后刷新即可看到结果。", p.getId());
                     }
                     if (items.isEmpty()) {
                         String err = root.path("message").asText(null);
@@ -167,7 +167,7 @@ public class MediaService {
                 List<MediaItem> items = collectDashscopeResults(root.path("output").path("results"));
                 if (items.isEmpty() && StringUtils.hasText(taskId)) {
                     return MediaResponse.image(List.of(), "pending",
-                            "万相生图任务已提交（task_id=" + taskId + ", status=" + or(taskStatus, "PENDING") + "），稍后刷新即可看到结果。");
+                            "万相生图任务已提交（task_id=" + taskId + ", status=" + or(taskStatus, "PENDING") + "），稍后刷新即可看到结果。", p.getId());
                 }
                 if (items.isEmpty()) {
                     String err = root.path("message").asText(null);
@@ -483,10 +483,10 @@ public class MediaService {
                             dashTaskId == null ? "" : dashTaskId,
                             dashStatus == null ? "PENDING" : dashStatus,
                             StringUtils.hasText(dashRequestId) ? "(request_id=" + dashRequestId + ")" : "");
-                    return MediaResponse.video(List.of(), "pending", msg);
+                    return MediaResponse.video(List.of(), "pending", msg, p.getId());
                 }
                 if ("pending".equalsIgnoreCase(status) || "processing".equalsIgnoreCase(status)) {
-                    return MediaResponse.video(List.of(), "pending");
+                    return MediaResponse.video(List.of(), "pending", null, p.getId());
                 }
                 String err = root.path("error").path("message").asText(null);
                 if (!StringUtils.hasText(err)) err = root.path("message").asText(null);
@@ -783,6 +783,66 @@ public class MediaService {
             return "🚫 " + action + "失败：无法连接到厂商接口，请检查 baseUrl 是否正确。";
         }
         return "❌ " + action + "异常：" + (m.isEmpty() ? e.getClass().getSimpleName() : m);
+    }
+
+    // =========================== Dashscope 异步任务轮询 ===========================
+
+    /**
+     * 查询 Dashscope 异步任务状态（图片/视频）。
+     * 文档：GET https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}
+     * 返回 MediaResponse：若成功则带 items[]（图片URL），否则返回 pending 或 error。
+     *
+     * @param taskId   Dashscope task_id
+     * @param profileId 对应模态的 ApiProfile ID（用于拿 API Key）
+     * @param kind     "IMAGE" 或 "VIDEO"
+     */
+    public MediaResponse pollTask(String taskId, Long profileId, String kind) {
+        try {
+            var opt = apiProfileService.getPlain(profileId);
+            if (opt.isEmpty()) {
+                return MediaResponse.error(kind, "❌ 未找到有效 API 配置，无法轮询任务状态");
+            }
+            var p = opt.get();
+            if (!StringUtils.hasText(p.getApiKey())) {
+                return MediaResponse.error(kind, "❌ API Key 未配置，无法轮询任务状态");
+            }
+            int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0
+                    ? p.getTimeoutSeconds() : 60;
+            final String endpoint = DASHSCOPE_ROOT + "api/v1/tasks/" + taskId;
+            HttpRequest req = HttpRequest.newBuilder().uri(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(timeout))
+                    .header("Authorization", "Bearer " + p.getApiKey())
+                    .GET()
+                    .build();
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (resp.statusCode() != 200) {
+                return MediaResponse.error(kind, "轮询任务失败（HTTP " + resp.statusCode() + "）");
+            }
+            JsonNode root = objectMapper.readTree(resp.body());
+            String dashStatus = root.path("output").path("task_status").asText(null);
+            // Dashscope 状态：PENDING / RUNNING / SUCCEEDED / FAILED
+            if ("SUCCEEDED".equalsIgnoreCase(dashStatus)) {
+                List<MediaResponse.MediaItem> items = collectDashscopeResults(root.path("output").path("results"));
+                if (!items.isEmpty()) {
+                    return MediaResponse.image(items);
+                }
+                // 视频可能返回 output.url 而非 results
+                String videoUrl = root.path("output").path("url").asText(null);
+                if (StringUtils.hasText(videoUrl)) {
+                    return MediaResponse.image(List.of(new MediaResponse.MediaItem(videoUrl, null, null)));
+                }
+                return MediaResponse.error(kind, "任务成功但未找到结果");
+            } else if ("FAILED".equalsIgnoreCase(dashStatus)) {
+                String err = root.path("message").asText(null);
+                return MediaResponse.error(kind, "任务失败：" + or(err, "未知错误"));
+            } else {
+                // PENDING / RUNNING → 继续等待
+                return MediaResponse.image(List.of(), "pending",
+                        "任务处理中（status=" + dashStatus + "），请稍后再次查询。", p.getId());
+            }
+        } catch (Exception e) {
+            return MediaResponse.error(kind, "轮询异常：" + e.getMessage());
+        }
     }
 
     // =========================== 请求体 records（局部用，避免外部污染包）===========================

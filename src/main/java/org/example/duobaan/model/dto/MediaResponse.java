@@ -17,34 +17,42 @@ public record MediaResponse(
         String audioMime,     // TTS 的 Content-Type，例 audio/mpeg
         String audioFilename, // TTS 建议保存名，例 speech.mp3
         String message,       // 可选的人读提示（万相异步 task_id 说明、操作指引等）
-        List<MediaItem> items // 图/视频：每张/每段一条
+        List<MediaItem> items, // 图/视频：每张/每段一条
+        Long profileId        // 关联的 ApiProfile ID，前端用于异步任务轮询
 ) {
     public static MediaResponse image(List<MediaItem> items) {
-        return new MediaResponse("IMAGE", "succeeded", null, null, null, null, null, null, items);
+        return new MediaResponse("IMAGE", "succeeded", null, null, null, null, null, null, items, null);
+    }
+    public static MediaResponse image(List<MediaItem> items, Long profileId) {
+        return new MediaResponse("IMAGE", "succeeded", null, null, null, null, null, null, items, profileId);
     }
     public static MediaResponse video(List<MediaItem> items, String status) {
-        return new MediaResponse("VIDEO", status, null, null, null, null, null, null, items);
+        return new MediaResponse("VIDEO", status, null, null, null, null, null, null, items, null);
     }
-    /** 视频 pending 时附一条说明（如 Dashscope task_id / request_id 提示）*/
     public static MediaResponse video(List<MediaItem> items, String status, String message) {
-        return new MediaResponse("VIDEO", status, null, null, null, null, null, message, items);
+        return new MediaResponse("VIDEO", status, null, null, null, null, null, message, items, null);
+    }
+    public static MediaResponse video(List<MediaItem> items, String status, String message, Long profileId) {
+        return new MediaResponse("VIDEO", status, null, null, null, null, null, message, items, profileId);
     }
     public static MediaResponse asr(String text) {
-        return new MediaResponse("AUDIO_ASR", "succeeded", null, text, null, null, null, null, List.of());
+        return new MediaResponse("AUDIO_ASR", "succeeded", null, text, null, null, null, null, List.of(), null);
     }
     public static MediaResponse tts(byte[] bytes, String mime, String filename) {
-        return new MediaResponse("AUDIO_TTS", "succeeded", null, null, bytes, mime, filename, null, List.of());
+        return new MediaResponse("AUDIO_TTS", "succeeded", null, null, bytes, mime, filename, null, List.of(), null);
     }
-    /** TTS 异步 pending：语音合成任务已提交但暂未返回二进制，前端稍后刷新拉取 */
     public static MediaResponse ttsPending(String message) {
-        return new MediaResponse("AUDIO_TTS", "pending", null, null, null, null, null, message, List.of());
+        return new MediaResponse("AUDIO_TTS", "pending", null, null, null, null, null, message, List.of(), null);
     }
     public static MediaResponse error(String kind, String friendly) {
-        return new MediaResponse(kind, "degraded", friendly, null, null, null, null, null, List.of());
+        return new MediaResponse(kind, "degraded", friendly, null, null, null, null, null, List.of(), null);
     }
     /** 图片 pending：Dashscope 异步任务已提交但暂未返回结果 URL */
     public static MediaResponse image(List<MediaItem> items, String status, String message) {
-        return new MediaResponse("IMAGE", status, null, null, null, null, null, message, items);
+        return new MediaResponse("IMAGE", status, null, null, null, null, null, message, items, null);
+    }
+    public static MediaResponse image(List<MediaItem> items, String status, String message, Long profileId) {
+        return new MediaResponse("IMAGE", status, null, null, null, null, null, message, items, profileId);
     }
 
     /** 单个图片 / 视频条目 */
