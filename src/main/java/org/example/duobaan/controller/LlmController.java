@@ -11,6 +11,7 @@ import org.example.duobaan.model.dto.ChatResponse;
 import org.example.duobaan.model.dto.ParseTasksRequest;
 import org.example.duobaan.model.dto.ParsedTask;
 import org.example.duobaan.service.ChatService;
+import org.example.duobaan.service.KnowledgeService;
 import org.example.duobaan.service.LlmGatewayService;
 import org.example.duobaan.service.TaskService;
 import org.example.duobaan.service.WeatherService;
@@ -39,15 +40,18 @@ public class LlmController {
     private final WeatherService weatherService;
     private final TaskService taskService;
     private final ChatService chatService;
+    private final KnowledgeService knowledgeService;
     private final ExecutorService sseExecutor;
 
     public LlmController(LlmGatewayService llmGateway, WeatherService weatherService,
                          TaskService taskService, ChatService chatService,
+                         KnowledgeService knowledgeService,
                          @Qualifier("sseExecutor") ExecutorService sseExecutor) {
         this.llmGateway = llmGateway;
         this.weatherService = weatherService;
         this.taskService = taskService;
         this.chatService = chatService;
+        this.knowledgeService = knowledgeService;
         this.sseExecutor = sseExecutor;
     }
 
@@ -71,8 +75,7 @@ public class LlmController {
     public ChatResponse chat(@RequestBody ChatRequest req) {
         ChatMode mode = req.mode() != null ? req.mode() : ChatMode.WORK;
         String userMsg = req.message() == null ? "" : req.message();
-        String systemContext = "天气：" + weatherService.now().summary()
-                + "\n" + taskService.contextSummary();
+        String systemContext = buildSystemContext(userMsg);
 
         // 1) 入库用户消息
         if (!userMsg.isBlank()) {
@@ -96,8 +99,7 @@ public class LlmController {
         SseEmitter emitter = new SseEmitter(0L);
         ChatMode mode = req.mode() != null ? req.mode() : ChatMode.WORK;
         String userMsg = req.message() == null ? "" : req.message();
-        String systemContext = "天气：" + weatherService.now().summary()
-                + "\n" + taskService.contextSummary();
+        String systemContext = buildSystemContext(userMsg);
 
         // 1) 入库用户消息（在执行线程内做，避免阻塞 sse 返回；但这里很快，先做也可以）
         if (!userMsg.isBlank()) {
@@ -158,5 +160,19 @@ public class LlmController {
         } catch (Exception ignore) {
             return ChatMode.WORK;
         }
+    }
+
+    /**
+     * 组装系统上下文：天气 + 流程表摘要 + 知识库检索结果（RAG）。
+     * RAG 检索每次对话都执行，只有相似度超过阈值返回非空时才注入，保证「提及知识库内容时优先查询」。
+     */
+    private String buildSystemContext(String userMsg) {
+        String base = "天气：" + weatherService.now().summary()
+                + "\n" + taskService.contextSummary();
+        String rag = knowledgeService.retrieveContext(userMsg);
+        if (rag != null && !rag.isBlank()) {
+            base += "\n" + rag;
+        }
+        return base;
     }
 }

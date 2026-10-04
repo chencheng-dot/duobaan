@@ -7,13 +7,15 @@ package org.example.duobaan.model;
  * - AUDIO：语音生成（TTS /audio/speech）与 语音转写（ASR /audio/transcriptions），同一 profile 两用
  * - VIDEO：文生视频（videos/generations，如 Seedance / 可灵）
  * - WEATHER：和风天气（不在多模态范畴，保留独立逻辑）
+ * - EMBEDDING：文本向量化（/embeddings），独立配置，不复用 LLM 的 Base URL/Key/Model
  *  持久化对应列由 MySQL ENUM 升级为 VARCHAR(20)，
- *  方便以后扩展新类型（如 SEARCH、EMBEDDING）时无需再改表结构 DDL。
+ *  方便以后扩展新类型（如 SEARCH）时无需再改表结构 DDL。
  */
 public enum ApiProfileType {
     LLM,
     IMAGE,
     AUDIO,
     VIDEO,
-    WEATHER
+    WEATHER,
+    EMBEDDING
 }

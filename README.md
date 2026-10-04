@@ -20,9 +20,10 @@
 | 流程表 | 今日/明日分组，状态流转（待办/进行中/完成/已上交） |
 | 美食推荐 | 结合天气、心情、口味、用餐方式，大模型推荐 |
 | 双页模式 | 办公模式 / 多巴胺模式 / 我的，左侧一键切换 |
-| 多套 API 配置 | 文本 / 图片 / 语音 / 视频 / 天气 五套独立配置，保存多套 Key，切换即用，删除即物理删除防泄露 |
+| 多套 API 配置 | 文本 / 图片 / 语音 / 视频 / 向量化 / 天气 六套独立配置，保存多套 Key，切换即用，删除即物理删除防泄露 |
 | 多模态生成 | 聊天顶栏一键切 Tab：智能 / 文本 / 图片 / 转写(ASR) / 朗读(TTS) / 视频，对应模型调用对应接口 |
-| 任务留痕（我的） | 已上交 / 已完成 / 已删除任务历史三栏展示，软删除不丢数据 |
+| 任务留痕（我的） | 已上交 / 已完成 / 已删除任务历史三栏展示，软删除不丢数据，已删除支持硬删除 |
+| RAG 知识库 | 我的页面建库，文本/文件自动分块向量化存 Redis，对话时优先检索知识库内容注入大模型 |
 
 ## 技术栈
 
@@ -31,6 +32,7 @@
 │  前端        Vue 3.5 + Vite 6 + Vue Router 4    │
 │  后端        Spring Boot 4.1.1 (Java 17)        │
 │  数据库      MySQL 8.0 (HikariCP 连接池)        │
+│  缓存/向量   Redis（知识库 embedding 向量存储）  │
 │  ORM        Spring Data JPA + Hibernate 7       │
 │  大模型     OpenAI 兼容协议（可换任意厂商）       │
 │  天气服务   和风天气 API                          │
@@ -42,11 +44,11 @@
 ```
 duobaan/
 ├── src/main/java/org/example/duobaan/
-│   ├── config/              # 配置类（异步线程池、RestClient、SchemaMigrator 幂等迁移）
-│   ├── controller/          # REST API 控制层
-│   ├── model/               # 实体 + DTO（ApiProfile / Task 软删除）
+│   ├── config/              # 配置类（异步线程池、RestClient、RedisConfig、SchemaMigrator 幂等迁移）
+│   ├── controller/          # REST API 控制层（KnowledgeController 知识库）
+│   ├── model/               # 实体 + DTO（ApiProfile / Task 软删除 / KnowledgeBase / KnowledgeChunk）
 │   ├── repository/          # Spring Data JPA 仓库（含 TaskHistoryRepository 绕过软删）
-│   └── service/             # 业务逻辑层（ApiProfileService 多套配置）
+│   └── service/             # 业务逻辑层（ApiProfileService 多套配置 / KnowledgeService 分块检索 / EmbeddingService / RedisVectorService）
 ├── src/main/resources/
 │   ├── application.properties   # 应用配置
 │   └── schema.sql               # 建表脚本（启动自动执行）
@@ -74,6 +76,7 @@ duobaan/
 | Node.js | ≥ 18 | 用于前端开发与构建 |
 | npm | ≥ 9 | 同上 |
 | MySQL | ≥ 8.0 | 数据库 |
+| Redis | ≥ 6.0 | 知识库向量缓存（可选，未启动时检索自动降级） |
 
 ### 1. 克隆项目
 
@@ -188,6 +191,17 @@ spring.datasource.password=你的密码
 > duobaan.llm.model=deepseek-chat
 > ```
 
+#### 3.3 向量化模型（RAG 知识库，可选）
+
+RAG 知识库需要一个 embedding 模型把文本转成向量。向量化模型**独立配置**，不复用文本模型。
+
+1. 启动本地 Redis（默认 `localhost:6379`，无密码），向量以 JSON 数组存 Redis，检索时内存算余弦相似度
+2. 进入「**设置 → 🧮 向量化模型**」，选择厂商或自定义，填 Base URL / API Key / 模型 ID（如千问 `text-embedding-v3`、OpenAI `text-embedding-3-small`）
+3. 保存并点击「使用」激活。Tab 右上角绿点亮起表示就绪
+4. 进入「**我的 → 知识库**」新建知识库，粘贴文本或上传 `.txt/.md`，自动分块+向量化
+
+> **常见坑**：如果上传内容时还没配向量化模型，分块文本存了 MySQL 但向量没存，检索找不到。配好 embedding 后，在知识库展开页点「**重新向量化**」即可对已有分块补做向量化。
+
 ### 4. 启动后端
 
 #### 方式一：Maven Wrapper（推荐）
@@ -244,7 +258,9 @@ npm run build         # 产物输出到 src/main/resources/static/
 |---|---|---|
 | `task` | 流程表任务 | title, category, task_group(TODAY/TOMORROW), task_status, source, submitted_at, deleted(软删标记), deleted_at |
 | `chat_message` | 对话记录 | mode(DOPAMINE/WORK), chat_role, content |
-| `api_profile` | 多套 API 配置（大模型 / 天气） | profile_type(LLM/WEATHER), provider, base_url, api_key, model_name, is_active, api_host(天气专属), timeout_seconds |
+| `api_profile` | 多套 API 配置 | profile_type(LLM/IMAGE/AUDIO/VIDEO/EMBEDDING/WEATHER), provider, base_url, api_key, model_name, is_active, api_host(天气专属), timeout_seconds |
+| `knowledge_base` | 知识库 | name, description, split_strategy(PARAGRAPH/SENTENCE/MARKDOWN/SIMPLE), chunk_size, chunk_overlap |
+| `knowledge_chunk` | 知识库分块 | kb_id, content, chunk_index, created_at（向量存 Redis，不存此表） |
 
 ### 建表策略
 
@@ -260,6 +276,7 @@ npm run build         # 产物输出到 src/main/resources/static/
 |---|---|
 | API Key 删除 | **物理删除**：前端在"设置页"删除某套配置后，后端直接 `DELETE FROM api_profile`，数据库不留明文 Key，防止泄露 |
 | 任务删除 | **软删除**：前端删除任务后，仅设置 `deleted=1` 并记录 `deleted_at`，查询时默认过滤；"我的"页可查看已删除任务，满足工作留痕 |
+| 任务硬删除 | **物理删除**：在「我的 → 已删除」中点「彻底删除」，后端用原生 SQL 绕过 `@SQLDelete` 直接 `DELETE FROM task`，不可恢复 |
 | 任务上交 | 提交时写入 `submitted_at`，在"我的 → 已上交"中可查询 |
 
 ### 常见数据库问题排查
@@ -296,12 +313,29 @@ npm run build         # 产物输出到 src/main/resources/static/
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/tasks` | 查询当前任务列表（软删除任务不返回） |
+| GET | `/api/tasks` | 查询当前任务列表（已完成/已上交/软删除的不返回） |
 | GET | `/api/tasks/mine` | 查询我的历史：已上交 / 已完成 / 已删除三栏（绕过软删过滤） |
 | POST | `/api/tasks` | 创建任务 |
 | PATCH | `/api/tasks/{id}` | 更新任务（状态/分组等） |
 | DELETE | `/api/tasks/{id}` | **软删除**任务（`deleted=1` + `deleted_at=NOW`），工作留痕 |
+| DELETE | `/api/tasks/{id}/hard` | **硬删除**任务（物理 DELETE 行），不可恢复 |
+| POST | `/api/tasks/{id}/migrate` | 迁移分组（今日↔明日） |
+| POST | `/api/tasks/submit` | 上交今日小结（今日 DONE → SUBMITTED） |
 | POST | `/api/tasks/bulk` | 批量创建任务（拆单写入） |
+
+### 知识库（RAG）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/knowledge/bases` | 列出所有知识库 |
+| POST | `/api/knowledge/bases` | 新建知识库（name/description/splitStrategy/chunkSize/chunkOverlap），描述非空时自动分块入库 |
+| DELETE | `/api/knowledge/bases/{id}` | 删除知识库（含分块和 Redis 向量） |
+| POST | `/api/knowledge/bases/{id}/documents` | 粘贴文本入库（自动分块+向量化） |
+| POST | `/api/knowledge/bases/{id}/upload` | 上传 .txt/.md 文件入库 |
+| GET | `/api/knowledge/bases/{id}/chunks` | 查看该知识库的分块列表 |
+| DELETE | `/api/knowledge/bases/{id}/chunks` | 清空该知识库分块（同时清 Redis 向量） |
+| POST | `/api/knowledge/bases/{id}/revectorize` | 对已有分块重新向量化（配好 embedding 后补做向量） |
+| GET | `/api/knowledge/status` | 查询 RAG 状态（embeddingReady / redisOk / hint） |
 
 ### 配置（系统 & 多套 API 配置）
 
@@ -330,9 +364,9 @@ npm run build         # 产物输出到 src/main/resources/static/
 
 - **办公模式**（默认）：侧边栏"办公"图标，流程表 + 办公对话
 - **多巴胺模式**：侧边栏"多巴胺"图标，美食推荐 + 生活助手
-- **我的**：侧边栏"我的"图标，三栏展示已上交 / 已完成 / 已删除任务，工作留痕与历史回顾
+- **我的**：侧边栏"我的"图标，四栏展示已上交 / 已完成 / 已删除任务 + 知识库管理。任务删除后可在「已删除」中找回或硬删除；知识库支持建库、分块策略配置、文本/文件入库、重新向量化。
 
-点击左侧图标即可切换；对话历史按办公/多巴胺模式隔离存储；任务删除后可在「我的 → 已删除」中找回。
+点击左侧图标即可切换；对话历史按办公/多巴胺模式隔离存储；任务删除后可在「我的 → 已删除」中找回或彻底删除；对话中提及知识库内容时自动优先检索注入大模型。
 
 ---
 
@@ -364,545 +398,119 @@ MIT
 
 ## 版本更新记录
 
-### v1.0.0 🚀（初始版本）
+### v1.0.0 🚀（初始版本 — 涵盖 v1~v3 全部功能）
 
-**核心功能上线**
-
-- 办公流程表：今日/明日分组任务管理，CRUD + 状态流转（待办/进行中/完成/已上交）
-- 多巴胺推荐：根据心情/天气/口味/用餐方式推荐美食
-- 实时天气：和风天气 API 接入，展示当前天气 + 体感温度
+**核心功能**
+- 办公流程表：今日/明日分组，CRUD + 状态流转（待办/进行中/完成/已上交），上交小结，零点自动转组
+- 多巴胺推荐：结合心情/天气/口味/用餐方式，大模型推荐美食
+- 实时天气：和风天气 API，中文城市名自动解析，7 种 SVG 线条图标，60 秒轮询
 - 实时时间：顶栏展示时间/星期/时段
-- 基础大模型对话：接入 LLM 完成办公问答与美食推荐
-- 双页模式：办公模式 / 多巴胺模式左侧一键切换
+- 大模型对话：SSE 流式输出，办公/多巴胺双模式，对话历史持久化（每 mode 限 50 条，刷新自动恢复）
+- 智能拆单：自然语言 → 结构化任务列表，一键写入流程表
+- 多模态生成：聊天顶栏 6 Tab（智能/文本/图片/转写/朗读/视频），对应模型调用对应接口；异步图片/视频任务持久化 + 自动轮询
+- 多套 API 配置：文本/图片/语音/视频/天气 五套独立 Profile，切换即用，删除即物理删除防 Key 泄露
+- 任务留痕（我的）：已上交/已完成/已删除三栏历史，软删除不丢数据
 
 **技术架构**
-
-- 后端：Spring Boot + JPA + H2 + Thymeleaf
-- 前端：原生 HTML/CSS/JS 模板渲染
-- 数据库：H2 嵌入式数据库
-
----
-
-### v2.0.0 🎨
-
-本次更新集中在 UI 美化、可视化增强与大模型接入体验优化：
-
-**1. 新增大模型配置页面（设置页）**
-- 侧边栏新增「设置」入口
-- 支持 4 个预设厂商 + 自定义：ChatGPT / DeepSeek / 豆包 / 千问 / 自定义
-- 点击厂商卡片自动填充 baseUrl 和默认模型
-- 保存后立即可用，无需重启服务
-- 新增 `/api/config/llm`、`/api/config/providers` 接口
-- 新增 `system_config` 数据库表，运行时配置持久化
-
-**2. 降低 API 接入门槛**
-- 大模型配置从 application.properties 迁移到页面可视化配置
-- 选厂商 → 填 Key → 保存，三步完成接入，无需改代码/配置文件
-- 配置未生效时自动降级，保证平台能独立启动使用
-- LlmGateway 统一从数据库读取运行时配置，优先于默认值
-
-**3. UI 页面重构（腾讯视频风格）**
-- DopaminePage 整体视觉升级：Hero 卡片、精致卡片式布局
-- 用餐方式改为大图标卡片选择（外卖/堂吃/自做）
-- 推荐按钮、结果卡片统一圆角 + 投影风格
-
-**4. 口味输入改为 输入框 + 下拉选项**
-- 支持自由输入任意口味词，也可从下拉列表快速选择
-- 底部 6 个常用口味快捷标签，一键选择
-- 预设 12 种口味：酸辣/清淡/甜口/咸鲜/重口/轻食…
-
-**5. 可视化页面增强**
-- 设置页：配置状态徽章（已配置/未配置）
-- 提供商说明卡片，快速定位各平台注册地址
+- 后端：Spring Boot 4.1.1 (Java 17) + Spring Data JPA + Hibernate 7
+- 前端：Vue 3.5 + Vite 6 + Vue Router 4
+- 数据库：MySQL 8.0 (HikariCP)，schema.sql 幂等建表，SchemaMigrator 自动补列
+- 大模型：OpenAI 兼容协议，URL 强力清洗 + 厂商识别鲁棒化
 
 ---
+### v2.0.0 🧠📚（本次更新：RAG 知识库系统 + 任务流优化）
 
-### v2.1.0 🌤️（本次更新）
+**两大功能上线**
 
-**1. 大模型提示更友好**
-- 未配置大模型/Key 无效时，不再抛出技术错误（如「流式调用失败 HTTP 401」），
-  改为直白提示：「⚠️ 未配置大模型，请先到「设置」页面选择厂商并填写 API Key，即可使用办公助手/美食推荐功能」
-- 修正设置页历史残留错字「柴GPT」和注册地址错误，统一为 ChatGPT + 正确官方网址
+#### 一、RAG 知识库（检索增强生成）
 
-**2. 天气服务升级：支持中文城市名，无需查 Location ID**
-- 后端新增「和风天气 GeoAPI 城市解析」，中文城市名（北京/上海/成都…）→ 自动解析为 LocationID
-- 设置页「城市 Location ID」字段改为「城市名」，默认「北京」
-- 新增 24h 城市解析缓存 + 10min 天气数据缓存，避免频繁调用
-- 兼容数字 LocationID（老用户无感）
-- 设置页新增天气 Tab：Key + 城市名 + 缓存时长 + 4 步使用说明
-- 后端新增 `WeatherConfigDTO`、`/api/config/weather` GET/POST、`ConfigService` 持久化方法
-- 配置优先级：数据库运行时配置 > application.properties
+对话时提及知识库内容，大模型优先检索并注入上下文回答，类似 FastGPT。
 
-**3. 天气可视化：7 种 SVG 线条图标**
-- 顶部 TopBar 不再使用 emoji，根据实时天气文字渲染轮廓风 SVG：
-  ☀晴 / ⛅多云 / ☁阴 / 🌧雨 / ❄雪 / ⚡雷暴 / 🌫雾霾
-- 同时展示温度和体感温度；未配置 Key 时显示「—」占位图标
+**1. 数据模型**
 
-**4. UI 风格统一：主配色白色 + 透明轮廓风**
-- 所有页面统一为纯白色背景 + 浅灰边线 + 深灰文字（`--brand / --border / --text / --text-muted`）
-- 渐变、彩色块、emoji、花哨阴影全部移除
-- Logo、侧边栏、导航、设置、天气图标一律改为无填充 SVG 线条轮廓
-- TopBar 重构为 Logo + 导航 + 天气 + 时间 + 设置按钮的极简行
-- WorkPage 改为两栏分隔线布局，去除卡片间距的花哨留白
-- DopaminePage / ChatPanel / FlowTable 统一白底细边框
+- 新增 `knowledge_base` 表：name / description / split_strategy / chunk_size / chunk_overlap
+- 新增 `knowledge_chunk` 表：kb_id / content / chunk_index（向量不存 MySQL，存 Redis）
+- `ApiProfileType` 枚举新增 `EMBEDDING`，向量化模型**独立配置**，不复用文本模型
 
-**5. 其它修复**
-- 修正设置页中「dev.qweather.com/docs/api/geo/city-lookup/」404 链接，改为直接使用中文城市名 + 前端可视化输入
-- 前端构建产物 123.95 kB（gzip 46.44 kB），后端 44 源文件全部编译通过
+**2. 向量存储：本地 Redis**
 
-**6. 天气显示 Bug 修复（commit 0a14596）**
-- **现象**：即使未配置天气 Key，右上角依然显示「晴 —℃ / 体感—℃」+ 太阳图标，保存天气配置并刷新浏览器后也仍保持该错误状态。
-- **根因**：
-  1. 后端 `WeatherNow.placeholder()` 里 `text` 被硬编码为 **"晴"**，与真实的"晴天"无法区分，导致前端天气图标匹配逻辑（/晴/.test(text)）直接命中 sunny。
-  2. 前端 `TopBar.vue` 没有"未配置态"与"真实态"的区分字段，只按文本判断图标。
-  3. 天气只在 `onMounted` 拉一次，保存配置后后端仍在运行旧进程（`/api/config/weather` 运行时配置 + GeoAPI 城市解析代码未生效）。
-- **修复方式**：
-  - 后端 [WeatherNow.java](src/main/java/org/example/duobaan/model/dto/WeatherNow.java) 新增 `configured: boolean` 字段（真实查询 = true，占位 = false）；占位 `text/temp/feelsLike` 全部改为 `"—"`。
-  - 前端 [TopBar.vue](src/components/TopBar.vue) 根据 `configured` 切换 UI：
-    - `false` → 虚线边框 + 灰文字 + ❓图标，显示 **「未配置天气 / 前往「设置」配置 Key」**，点击跳转到设置页。
-    - `true` → 正常展示 7 种 SVG 天气图标 + 温度/体感，点击**立即手动刷新**；额外每 **60 秒** 自动轮询，无需手动刷浏览器（最多 1 分钟生效）。
-  - 更新了 `/api/config/weather` 配置变更 → `WeatherService` 自动清缓存，下次请求重新走 GeoAPI + /v7/weather/now。
-- **升级注意**：从 v2.0 升级的用户请务必**重启后端进程**（否则运行的还是旧 class，`configured` 字段和天气配置持久化都不会生效，表现为"已保存天气配置但右上角不变"）。
+- 引入 `spring-boot-starter-data-redis` + Jedis，配置 `localhost:6379`
+- 向量以 JSON 数组存 Redis：`kb:vec:{chunkId}` 存向量，`kb:chunks:{kbId}` 登记分块
+- 检索时批量 MGET 全部向量，**内存算余弦相似度**（不依赖 RediSearch 向量索引，兼容性更好）
+- Redis 未启动时检索自动降级跳过，不影响对话
 
----
+**3. 分块策略（4 种）**
 
-### v3.0.0 🗂️（本次更新）
-
-**1. 多套 API 配置持久化（新建 api_profile 表）**
-
-- 新增 `api_profile` 数据库表，大模型和天气配置均可保存多套（Profile），每套独立存储
-- 后端新增实体/枚举/DTO/Repository/Service/Controller 全链路：
-  - `ApiProfile.java` + `ApiProfileType.java`（LLM/WEATHER 两种类型）
-  - `ApiProfileService.java`（CRUD + activate 切换 + 旧配置自动迁移）
-  - `ConfigController.java` 新增 5 个 `/api/config/profiles**` 接口（列表/新建/更新/删除/激活）
-- 设置页「大模型」和「天气服务」Tab 各新增「已保存配置」列表区：
-  - 每套展示名称/厂商/模型/打码后的 Key，**当前生效那套带绿色"使用中"徽章**
-  - 支持「保存为新配置」「使用」「编辑更新」「🗑 删除」四种操作
-- **删除即物理删除防泄露**：前端点删除后，后端直接 `DELETE FROM api_profile`，数据库不留明文 Key 行，部署/交接/排查时都不会残留敏感信息
-- LlmGatewayService 和 WeatherService 统一从 active profile 读取配置，切换立即生效（无需重启）
-- **向后兼容**：旧 `/api/config/llm` `/api/config/weather` 接口保持可用，内部读写 active profile
-
-**2. 任务软删除 + 工作留痕**
-
-- `task` 表新增三个字段：
-  - `deleted TINYINT(1) DEFAULT 0`（软删标记）
-  - `deleted_at DATETIME(6)`（软删时间）
-  - `submitted_at DATETIME(6)`（上交时间）
-- 实体 `Task.java` 加 Hibernate 软删注解：
-  - `@SQLRestriction("deleted = 0")`：正常查询自动过滤已删除任务
-  - `@SQLDelete(sql = "UPDATE task SET deleted = 1, deleted_at = NOW(6) WHERE id = ?")`：DELETE 请求走软删 SQL
-- 新增 `TaskHistoryRepository.java`，用 `nativeQuery` 绕过软删过滤，供"我的"页使用
-- 新增 `SchemaMigrator.java`：启动时用 `information_schema` 判断 task 表是否缺列，缺则 `ALTER TABLE` 补齐，老库升级零手工操作
-
-**3. 新增「我的」Tab — 历史任务三栏查看**
-
-- 侧边栏在「多巴胺」下新增「我的」按钮（SVG 线条图标）
-- 新建 `MinePage.vue` 页面，三 Tab 布局：
-  - **已上交**：`task_status = SUBMITTED`，按 `submitted_at` 倒序
-  - **已完成**：`task_status = DONE`，按 `updated_at` 倒序
-  - **已删除**：`deleted = 1`，按 `deleted_at` 倒序，红色"已删除"徽章
-- 后端新增 `GET /api/tasks/mine`，一次返回三组列表 + 各自统计数量
-- 每条任务卡片显示：标题/分类/分组（今日/明日）/状态/来源/创建时间/上交或删除时间
-- 支持空状态提示（"还没有上交的任务，去完成并上交吧！"等）
-
-**4. 其它修复 & 提升**
-
-- Jackson 3.x 包名兼容：`JsonProcessingException` 改为 `tools.jackson.databind.JsonProcessingException`
-- ApiProfileService 编译修复：`timeoutSeconds`（int）与 null 比较改为 `> 0`
-- README.md 全面更新：API 列表分 5 类、数据库安全说明、多套配置操作指南、三页说明
-- 前后端编译验证：后端 53 源文件编译通过、前端 44 模块构建成功、端到端测试三栏历史/软删/物理删除全部走通
-
----
-
-### v3.1.0 💬（本次更新：对话历史持久化 — 刷新不再清空）
-
-**问题背景**：之前和大模型对话后，一刷新浏览器消息全没了。原因是前端仅用内存 `messages` 数组保存气泡，后端 `chat_message` 表虽然建了但 SSE/chat 接口完全没往里面写，也没有拉历史的接口。
-
-**写入链路 + 重建链路 双端打通**（对应「刷新后状态丢失」类问题标准解法）：
-
-**1. 写入链路：对话双方即时落库，流式累积 done 时一次性入库**
-
-- 新增 [ChatService.java](src/main/java/org/example/duobaan/service/ChatService.java)：
-  - `appendAndTrim(mode, role, content)`：单条写入后，`countByMode` 统计该 mode 总数，**> 50 则物理删除最旧 N 条**（`deleteAllByIdInBatch`），数据库严格限长，绝不无限增长。
-  - `getHistory(mode, limit)`：按 `(mode, created_at DESC, id)` 复合索引取最近 limit 条，再反转为时间正序返回给 UI。
-- [LlmController.java](src/main/java/org/example/duobaan/controller/LlmController.java) 改造：
-  - **非流式 `/chat`**：`入库 user message → 调 llmGateway → 入库 assistant reply` 三步串行，异常也落降级提示。
-  - **流式 `/chat/stream`**：发 SSE 前先入库 user message；过程中用 `StringBuilder` 累积每片 delta，在 `done` 事件时**一次性入库完整助手回复**（避免流式逐 token 写 50 次库）；出错则把"已累积 delta + 错误提示"一并入库，刷新后用户能看到断线前收到的内容。
-- 新增复合索引 `idx_chat_mode_created (mode, created_at DESC, id DESC)`：history 查询与 trim 删除都走索引，50 条规模下全是毫秒级。
-- SchemaMigrator 幂等迁移：为老库判断 `information_schema.STATISTICS`，缺索引自动 ALTER，不需要手动 DROP 表。
-
-**2. 重建链路：ChatPanel onMounted 拉历史，刷新即渲染**
-
-- 前端 `api/index.js`：+ `getChatHistory(mode, limit = 50)`，封装 `GET /api/llm/history`。
-- [ChatPanel.vue](frontend/src/components/ChatPanel.vue) 引入 `onMounted`：组件挂载完成后立即调用 `getChatHistory(props.mode, 50)`，将返回的 `[{role, content}]` 数组赋给 `messages`，并 `scrollToBottom()` 定位到底部最后一条。
-- WORK / DOPAMINE 两种 mode **完全隔离**：办公对话和多巴胺推荐各自存 50 条，互不干扰。
-
-**3. 为什么没选 Redis？**
-
-用户原话是「用 Redis 缓存或者 其他的」。评估后选 **MySQL + 限长 50 条**，理由：
-- 现有项目已用 MySQL，额外引入 Redis 需要本地/服务器部署一个新进程，部署门槛明显抬高（对普通用户不友好）。
-- 每 mode 最多 50 条 × 2 mode = 100 行，配合复合索引查询 ≈ Redis 的响应量级（都是 <1ms）。
-- MySQL 天然持久化，不怕进程重启/机器断电，作为「会话存档」比纯 Redis 更稳（即便以后想加热缓存层，也可在 ChatService 上再叠加）。
-
-**4. 接口与 API 文档同步更新**
-
-- README 大模型接口表新增 `POST /api/llm/chat` 非流式条目、以及新接口 `GET /api/llm/history?mode=WORK|DOPAMINE&limit=50`。
-- 接口注释说明「对话自动入库 chat_message / 前端挂载时恢复」。
-
-**5. 端到端实测**
-
-| 场景 | 结果 |
+| 策略 | 说明 |
 |---|---|
-| 初始 GET history（WORK） | ✅ 0 条 |
-| POST `/chat` 发一句「你好」→ GET history | ✅ 出现 2 条（user + 助手真实回复，你这边已配好 Key 不是降级提示） |
-| 再 GET history（DOPAMINE） | ✅ 0 条（两 mode 严格隔离） |
-| DOPAMINE 发「推荐午餐」→ 再 GET history | ✅ 2 条，WORK 侧仍保持自己的 2 条 |
-| 刷新浏览器 → ChatPanel onMounted 触发 | ✅ 对应 mode 的 2 条消息自动渲染并滚动到底部，**完全恢复上次对话** ✨ |
+| PARAGRAPH（默认） | 按段落聚合，接近 chunkSize 时切分，相邻块重叠 overlap 字符 |
+| SENTENCE | 按句末标点（。！？.!?）切分，再按 chunkSize 聚合 |
+| MARKDOWN | 按 # 标题切分，单块过长时按段落再切 |
+| SIMPLE | 固定长度硬切，带 overlap 重叠 |
 
----
+**4. 检索注入**
 
-### v3.2.0 🎨🎬🔊（本次更新：多模态生成 — 文本 / 图片 / 语音 / 视频，按需调用对应模型）
+- `KnowledgeService.search(query, topK=4)`：向量化问题 → 取所有知识库向量 → 余弦相似度 ≥ 0.35 的 top-4 分块
+- `LlmGatewayService` 在办公/多巴胺对话前调用 `buildSystemContext()`，命中的分块拼进系统提示词
+- 未命中或 embedding 未配置时不注入，正常对话
 
-**需求背景**：单个大语言模型只能聊天，没法画图、生成视频、转写录音、朗读文字。用户的原话是「每当我提出要求的时候，可以有对应的模型来完成我的要求」。
+**5. 「重新向量化」补救**
 
-**解决思路**：把「大模型」拆成 5 类独立能力，每类独立走自己的 ApiProfile.active，聊天顶栏用 6 Tab 胶囊直接路由到对应接口，用户一眼知道"现在在调用什么模型"。
+- 如果上传时未配 embedding，分块文本存了 MySQL 但向量没存
+- 配好 embedding 后，在知识库展开页点「**重新向量化**」，分批（每批 16 条）重新调 embedding 接口写入 Redis
 
-**1. 后端：能力分层 + 统一响应 DTO**
+**6. 创建知识库时描述自动入库**
 
-- 新增枚举 [ApiProfileType.java](src/main/java/org/example/duobaan/model/ApiProfileType.java)：`LLM | IMAGE | AUDIO | VIDEO | WEATHER`，不再把所有东西都塞成"LLM配置"。
-- `api_profile.profile_type` 从 ENUM 幂等迁移成 VARCHAR(20)：`SchemaMigrator.migrateApiProfileTable` 判断信息模式，老数据按旧 ENUM 值 UPDATE。
-- 新增 [MediaResponse.java](src/main/java/org/example/duobaan/model/dto/MediaResponse.java)：`kind/status/error/text/audioBytes/audioMime/items[]`，所有多模态接口共用同一结构。
-- 新增 [MediaService.java](src/main/java/org/example/duobaan/service/MediaService.java)：4 类能力全覆盖，**都走 OpenAI 兼容协议**，换厂商只换 baseUrl + model：
-  - 文生图：`POST {baseUrl}/images/generations`，超时 60s，优先取 `data[].url`，回退到 `data[].b64_json`
-  - TTS 文生语音：`POST {baseUrl}/audio/speech`，直接读响应二进制（不是 JSON），返回 `audioBytes/audioMime/speech.mp3`
-  - ASR 语音转写：`POST {baseUrl}/audio/transcriptions`，`MultipartFile` 上传，取 `{text}` 字段
-  - 文生视频：`POST {baseUrl}/videos/generations`，超时 180s，识别 `succeeded / pending / failed` 三态
-- **未配置降级**：每类 ApiProfile 无 active 时返回 `status=degraded + 中文用户友好错误`（如「⚠️ 未配置「图片模型」，请先到「设置 → 图片模型」选厂商填 Key 并点击「使用」」），HTTP 200 而非 500，前端直接渲染气泡不报错。
-- 新增 [MediaController.java](src/main/java/org/example/duobaan/controller/MediaController.java)：4 个接口 `POST /api/media/{image,speech,transcribe,video}`，每次成功都把「富内容 JSON」以 `%%RICH_MEDIA%%{"kind","payload","text"}` 前缀写入 `chat_message`，和 v3.1「对话历史自动恢复」兼容。
+- 新建知识库时若 description 非空，自动把描述当内容分块入库（避免用户把资料写在描述里却没有分块的问题）
 
-**2. 设置页：5 Tab 独立管理（文本 / 图片 / 语音 / 视频 / 天气）**
+#### 二、任务流优化
 
-- 后端 `ConfigService.getProviderPresetsByType` 新增 13 条预设：
-  - IMAGE：DALL·E 3 / Seedream(火山) / 万相(通义) / CUSTOM
-  - AUDIO：OpenAI(TTS+Whisper) / 火山(TTS/ASR) / MiniMax / CUSTOM
-  - VIDEO：Seedance(火山) / 可灵Kling(快手) / 万相视频(通义) / CUSTOM
-  - WEATHER：和风 / CUSTOM
-- 新接口 `GET /api/config/providers/all`：一次性返回 5 类预设，前端 SettingsPage 5 Tab 复用同一套「新增/编辑/删除/设为使用」UI。
-- 每个 Tab 右上角绿色小圆点独立显示"已激活"，不再混淆 LLM 和 IMAGE 是否配置。
+**1. 完成即隐藏，只在「我的」可见**
 
-**3. 聊天面板：6 模态胶囊选择器 + 富气泡渲染**
+- `TaskService.list()` 返回今日/明日列表时过滤掉 `DONE` 和 `SUBMITTED`
+- 前端 `FlowTable.toggle()` 勾选完成（TODO→DONE）后立即从本地列表移除
+- 已完成任务在「我的 → 已完成」可查
 
-- [ChatPanel.vue](frontend/src/components/ChatPanel.vue) 顶栏新增 6 颗胶囊：`智能(AUTO) / 文本(TEXT) / 图片(IMAGE) / 转写(ASR) / 朗读(TTS) / 视频(VIDEO)`。
-  - **智能 / 文本**：走原来的 `chatStream` SSE 流式（`AUTO` 和 `TEXT` 行为等价，`AUTO` 是给"不知道选啥"的用户默认项）
-  - **图片**：输入描述 → 调用 `generateImage` → 气泡内渲染 `img` 网格，点击图片新标签页打开原图
-  - **转写**：输入框替换为虚线文件框 → 选 mp3/wav/m4a/flac → 调 `transcribeAudio` → 文本直接展示在气泡内并自动入库当 LLM 上下文
-  - **朗读**：输入文字 → 调 `generateSpeech` → 前端把 `audioBytes` base64 → Blob URL → `<audio controls>` 直接播放
-  - **视频**：输入描述 → 生成较久（spinner 动画提示 1~3 分钟）→ 返回 `succeeded` 时渲染 `<video controls>`，`pending` 时提示"排队中稍后重试"
-- 富内容恢复：挂载时解析 `%%RICH_MEDIA%%` 前缀 JSON，自动重建 `img / audio / video` 标签，刷新不丢失多模态结果。
-- 「拆单」按钮仅在智能 / 文本 Tab 显示，避免 IMAGE/VIDEO Tab 里出现语义混乱。
-- 发送按钮文案根据当前模态动态切换（"生成图片 / 开始朗读 / 生成视频 / 开始转写"），降低认知门槛。
+**2. 已删除支持硬删除**
 
-**4. 接口表同步更新**
+- 后端 `TaskRepository.hardDelete()` 用原生 SQL `DELETE FROM task` 绕过 `@SQLDelete`（软删除注解）
+- 新接口 `DELETE /api/tasks/{id}/hard`
+- 「我的 → 已删除」每个卡片右下角加「彻底删除」按钮，二次确认后物理移除，不可恢复
 
-| 接口 | 方法 | 说明 |
-|---|---|---|
-| `/api/config/providers/all` | GET | 拉取 5 类厂商预设（LLM/IMAGE/AUDIO/VIDEO/WEATHER） |
-| `/api/media/image` | POST | 文生图，返回 items[].url / b64Data |
-| `/api/media/speech` | POST | 文生语音，返回 base64 audioBytes + audioMime |
-| `/api/media/transcribe` | POST (multipart) | 上传音频 → 返回转写 text |
-| `/api/media/video` | POST | 文生视频，status 三态 succeeded / pending / failed |
+**3. 移除自动执行任务指令**
 
-**5. 端到端实测（未配置 API Key 场景下的降级回归）**
+- ChatPanel 删除「自动执行任务指令」解析器（LLM 输出格式不稳定，且容易谎称已完成但实际未操作）
+- 办公系统提示词新增硬约束：明确告知 AI 没有修改流程表的权限，要求用户手动点按钮操作
 
-| 场景 | 结果 |
-|---|---|
-| POST `/api/media/image`（未配置 IMAGE） | ✅ HTTP 200 / `status=degraded` / 中文提示"去设置→图片模型填 Key" |
-| POST `/api/media/speech`（未配置 AUDIO） | ✅ HTTP 200 / `status=degraded` / 中文提示"去设置→语音模型填 Key" |
-| POST `/api/media/video`（未配置 VIDEO） | ✅ HTTP 200 / `status=degraded` / 中文提示"去设置→视频模型填 Key" |
-| GET `/api/config/providers/all` | ✅ 返回 LLM(5条) + IMAGE(4条) + AUDIO(4条) + VIDEO(4条) + WEATHER(2条) |
-| 前端切图片 Tab → 输入 → 发送 | ✅ 调 /image，未配置直接渲染降级气泡，不抛异常 |
-| 刷新浏览器 → 富内容图片气泡 | ✅ 从 `%%RICH_MEDIA%%` JSON 自动还原 `<img>` |
+#### 三、设置页 UI 优化
 
----
+- 「系统设置」副标题移除
+- 「向量化模型」Tab 配置完成后显示绿色就绪点（`readyState` 补充 embedding 类型）
 
-### v3.3.3 🧠 修复：图片语音「还是报 404」— 厂商识别鲁棒化 + 模型ID跨模态防呆（用户第三轮报告）
+#### 四、启动兼容性修复
 
-**Bug 现象（用户实锤截图 + 数据库取证）**：
-
-| 场景 | 用户配置 | 之前表现 | 修复后表现 |
-|------|---------|----------|-----------|
-| 图片模型 | 预设=万相(阿里通义)、模型ID=`wan2.7-t2v-2026-06-12`（**视频模型**）、base=兼容模式 | ❌ `HTTP 404 / 模型 ID 或厂商地址有误` | ✅ 直接友好提示：`❌ 检测到 wan2.7-t2v-* 是「文生视频」模型，不能用于图片生成，请换 wanx2.1-t2i-turbo（万相文生图）`，不发起 HTTP 请求 |
-| 语音模型 | 预设=**自定义**(provider=CUSTOM)、模型ID=`sambert-zhide-v1`、base=兼容模式 | ❌ `HTTP 404 / 模型 ID 或厂商地址有误` | ✅ Sambert 专属提示：`ℹ️ Dashscope Sambert 系列仅提供 WebSocket 接口，请换 CosyVoice(cosyvoice-v3-flash) 或 Qwen-Audio-TTS，暂时无法通过 HTTP 调用` |
-| 图片模型 | 正确配置(wanx2.1-t2i-turbo + WANXIANG 预设) | ❌ 旧进程未重载代码仍 404 | ✅ 走 Dashscope 原生 `text2image/image-synthesis`；若账号欠费返回 `code=Arrearage（请充值）` 而非 404 |
-
-**两轮 404 的真正根因（本项目关键教训）**：
-
-1. **跨模态混用模型 ID**：把 `wan*-t2v-*`（视频模型）填到「图片模型」配置里 → 即使走对原生 endpoint，Dashscope 图片接口也不认视频模型，返回 `url error / InvalidParameter → code=404`。**防呆策略**：在 IMAGE Dashscope 分支最开头用正则识别 `-t2v-/wan2.*t2v/wan-t2v` 前缀，直接命中就给中文操作建议，不浪费 HTTP 请求。
-
-2. **「自定义」预设导致厂商识别漏判**：语音 Tab 用户不选「万相 TTS」预设而点「自定义」填 `sambert-zhide-v1` + 兼容 base → 旧 `vendorOf()` 只看 provider 与 baseUrl，provider=CUSTOM 时虽然 base 含 `dashscope.aliyuncs.com` 理论能命中，但旧进程/旧代码或 baseUrl 带 Markdown 脏字符 `>` 时会漏判 → 掉到兼容分支 `POST {base}/audio/speech` 而 Dashscope 兼容模式根本不开放 TTS → **HTTP 404**。**兜底策略**：新增 vendorOf() **第二层模型 ID 前缀判定**：
-   ```
-   wanx / wan- / wan2. / sambert- / cosyvoice / qwen-audio / paraformer / seacosformer
-       → 一律识别为 DASHSCOPE（无视 provider/baseUrl 配置）
-   ```
-   无论用户是选了"自定义"还是复制粘贴时带入脏字符，只要模型 ID 是 Dashscope 家族就 100% 走对分支。
-
-3. **Dashscope 404 友好提示扩充**：`httpFail()` 当 `code==404 && vendor==DASHSCOPE` 时按模态给出对照表：
-   - 图片 → 用 wanx-*-t2i（不是 t2v）
-   - 视频 → 用 wan*-t2v（不是 t2i）
-   - TTS → 用 cosyvoice-v3-flash / qwen-audio-3.0-tts-flash（不是 sambert-*，后者只有 WebSocket）
-   - ASR → 用 paraformer-v2 / seacosformer-v2
-
-**实机验证（后端 localhost:8080 三接口 curl 全通）**：
-
-| 接口 | 请求 | HTTP 状态 | 返回 status | 说明 |
-|------|------|----------|-------------|------|
-| POST /api/media/image | prompt=落叶图 | 200 OK | degraded=Arrearage 400（欠费） | ✅ 不再 404，endpoint 对了（欠请到 dashscope 控制台充值） |
-| POST /api/media/speech | input=你好，我是多巴胺小助手 + sambert-zhide-v1 | 200 OK | degraded=Sambert 建议换模型 | ✅ 不再 404，正确进入 Sambert 降级分支 |
-| POST /api/media/video | prompt=小猫在草地上跑 + wan2.7-t2v | 200 OK | pending | ✅ 正确走万相视频原生接口并拿到异步 task_id |
-
-**代码变更文件**（1 个核心文件）：
-- `src/main/java/org/example/duobaan/service/MediaService.java`
-  - `vendorOf()` 新增第二层模型 ID 前缀兜底（~13 行）
-  - `generateImage()` Dashscope 分支增加 t2v 视频模型防呆（~8 行）
-  - `httpFail()` Dashscope 404 提示扩充为「① 模型ID对照表 ② baseUrl 路径防重复」
-
-**用户操作提示**：
-1. 图片模型请到「设置 → 图片模型」把模型 ID 改成 `wanx2.1-t2i-turbo`（推荐）或 `wanx1.5-t2i-plus`；**不要再填 wan*-t2v-**
-2. 语音模型请到「设置 → 语音模型」把模型 ID 从 `sambert-zhide-v1` 换成 `cosyvoice-v3-flash`（推荐）或 `qwen-audio-3.0-tts-flash` 即可正常 HTTP 朗读
-3. 图片/视频/语音 Tab 所有 404 已彻底消除；欠费请到 [百炼控制台](https://dashscope.console.aliyun.com/) 充值后使用
-
----
-
-### v3.3.4 ⏳ 修复：异步图片/视频任务持久化 + 自动轮询 + 零点自动转组
-
-**三大问题一次解决**
-
-| # | 问题 | 根因 | 修复 |
-|---|------|------|------|
-| 1 | 刷新后图片消失 | `persistAsAssistant()` 只保存 `succeeded` 状态，pending 消息不入库 | 同时保存 `pending` 状态的富媒体 JSON 到数据库 |
-| 2 | 图片永远不出来 | Dashscope 异步任务提交后没有轮询机制 | 每 5 秒自动轮询任务状态，最多 12 次（60 秒） |
-| 3 | 任务过零点不转组 | Task 的 `group` 字段是静态存储，无日期变更自动转组 | 定时任务（零点 00:05）+ 懒加载（每次查询时检查）双保险 |
-
-**1. 异步任务持久化 + 自动轮询**
-
-- **MediaResponse 新增 `profileId` 字段**：前端可追踪用哪个 profile 轮询 Dashscope 任务状态
-- **MediaService 新增 `pollTask()` 方法**：GET `https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}` 查询异步任务状态
-- **MediaController 新增 `GET /api/media/poll-task?taskId&profileId&kind` 接口**：前端轮询入口
-- **前端 ChatPanel.vue 自动轮询**：
-  - `doImage()` / `doVideo()` 提交后检测到 `pending` 状态 + `profileId` 时自动启动轮询
-  - `startPolling()` 每 5 秒调用 `/poll-task`，成功后更新气泡为图片/视频，失败显示错误
-  - `onMounted()` 恢复 pending 消息时自动重启轮询（刷新不丢进度）
-- **pending 消息入库**：`persistAsAssistant()` 现在同时保存 `succeeded` 和 `pending` 状态的富媒体 JSON，刷新后能恢复任务状态
-
-**2. 零点自动转组（明日 → 今日）**
-
-- **定时任务**：`@Scheduled(cron = "0 5 0 * * *")` 每天 00:05 执行，把所有 TOMORROW 组任务转到 TODAY
-- **懒加载保险**：`ensureRollover()` 在 `list()` / `contextSummary()` 等查询入口调用，即使用户几天没启动后端，重启后也能立即完成转组
-- **启动类启用调度**：`DuobaanApplication.java` 添加 `@EnableScheduling`
-
-**3. 错误判断修复**
-
-- 前端轮询失败判断从 `res.status === 'failed'` 改为 `res.status === 'degraded' || res.error`（后端 MediaResponse 使用 `degraded` 状态而非 `failed`）
-- 轮询成功后调用后端同步接口（预留后续扩展）
-
-**接口测试验证（v3.3.4 实测）**
-
-| 接口 | 方法 | 测试结果 |
-|------|------|----------|
-| `/api/tasks?group=TODAY` | GET | ✅ 1 条任务（转组生效） |
-| `/api/tasks` | POST | ✅ 创建任务 id=9 |
-| `/api/config/profiles?type=LLM` | GET | ✅ 1 个配置 |
-| `/api/config/profiles?type=IMAGE` | GET | ✅ 1 个配置 |
-| `/api/config/profiles?type=AUDIO` | GET | ✅ 1 个配置 |
-| `/api/config/profiles?type=VIDEO` | GET | ✅ 1 个配置 |
-| `/api/config/profiles?type=WEATHER` | GET | ✅ 1 个配置 |
-| `/api/media/image` | POST | ✅ status=pending（异步任务提交成功） |
-| `/api/media/speech` | POST | ✅ status=succeeded（语音合成成功） |
-| `/api/media/video` | POST | ✅ status=pending（异步任务提交成功） |
-| `/api/media/poll-task` | GET | ✅ status=degraded（测试用 task_id 不存在，返回预期错误） |
-| `/api/llm/history?mode=WORK` | GET | ✅ 50 条历史消息 |
-| `/api/llm/parse-tasks` | POST | ✅ 解析成功 |
-| `/api/config/weather` | GET | ✅ 天气配置正常 |
-| `/api/time/now` | GET | ✅ 时间接口正常 |
-| `/api/config/providers` | GET | ✅ 5 个提供商预设 |
+- `RedisConfig` 的 `timeout` 字段从 `int` 改为 `java.time.Duration`，兼容 `3000ms` 格式
+- `DuobaanApplication` 排除 `JmxAutoConfiguration`，避免 JedisPool 被注册为 MBean 时 devtools 热重启冲突
 
 **文件变更**
 
 | 文件 | 变更 |
 |------|------|
-| `MediaResponse.java` | 新增 `profileId` 字段（record 第10个组件），新增多个带 profileId 的工厂方法 |
-| `MediaService.java` | 新增 `pollTask()` 方法 + 所有 pending 返回带 profileId |
-| `ApiProfileService.java` | 新增 `getPlain(Long id)` 方法获取完整实体（含 API Key） |
-| `MediaController.java` | pending 消息入库 + 新增 `/poll-task` 接口 |
-| `TaskService.java` | 新增 `rolloverTomorrowToToday()` + `ensureRollover()` 零点自动转组 |
-| `DuobaanApplication.java` | 添加 `@EnableScheduling` 启用定时任务 |
-| `ChatPanel.vue` | 自动轮询（5秒/次，最多12次）+ 刷新后恢复 pending 轮询 + 错误判断修复 |
-| `api/index.js` | 新增 `pollTask()` API 调用 |
-
----
-
-### v3.3.2 🧩 修复：图片/语音仍报 404（Dashscope 半完成代码 + endpoint 错 + Sambert HTTP 缺失）
-
-**Bug 现象（用户报告「还是有问题」+ 两张实锤截图）**：
-
-1. 「文生图」Tab 发提示 → `❌ 模型 ID 或厂商地址有误，请核对预设模型或自定义 baseUrl（HTTP 404）`
-2. 「朗读」Tab 发文字 → 同样 HTTP 404（而视频 Tab 的万相视频是好的）
-
-**根因三连：前一轮 v3.3.1 代码「已应用」但不完整**，叠加 endpoint 抄错：
-
-| # | 根因 | 后果 |
-|---|---|---|
-| 1 | `MediaService.java` 引用了 `DASHSCOPE_ROOT / dashscopeImageSize / dashscopeAudioFormat / collectDashscopeResults / guessFileExtension / or` 共 6 个成员 + `httpFail(4参数)` 重载，但文件里没定义；`MediaResponse.java` 缺 `image(3参数) / ttsPending` 2 工厂方法 → **后端根本编译不过**，实际运行的是停留在旧兼容分支（`POST {base}/images/generations` 和 `{base}/audio/speech`）的老 jar → 对 Dashscope 100% 命中 404（兼容模式仅 chat/embeddings） |
-| 2 | IMAGE endpoint 写成 `/image-generation/generation`（这是 **千问 Qwen-Image** 专用路径）；万相 wanx/wan T2I 系列官方正确路径是 `/aigc/text2image/image-synthesis` → 模型 + 路径不兼容 → Dashscope 报 `code=InvalidParameter / message=url error, please check url`（看起来像 url 错，实际是接口跟模型族错配） |
-| 3 | TTS endpoint 老代码写 `/aigc/text2audio-synthesis/multi-synthesis` + 参数塞 `parameters` 段，百炼官方非实时 TTS HTTP API 正确路径是 `/services/audio/tts/SpeechSynthesizer`，且 `format/sample_rate/voice/rate` 必须塞 `input` 对象内。另叠加用户模型 ID 填的是 `sambert-zhide-v1`（Sambert 系列**只有 WebSocket，没有 HTTP API**） |
-
-**修复清单（编译 → endpoint → 模型族 3 层同时兜底）**：
-
-1. **补齐 2 文件 14 处缺失**：
-   - [MediaResponse.java](src/main/java/org/example/duobaan/model/dto/MediaResponse.java)：新增 3 参 `image(items, status, message)` + `ttsPending(message)` 2 个工厂方法
-   - [MediaService.java](src/main/java/org/example/duobaan/service/MediaService.java)：
-     - 加 `DASHSCOPE_ROOT = "https://dashscope.aliyuncs.com/"` 常量（VIDEO 分支之前是硬编码字符串，统一管理）
-     - 加 `dashscopeImageSize`：把 OpenAI 风格 `1024x1024` 转万相原生 `1024*1024`
-     - 加 `dashscopeAudioFormat`：format 参数白名单映射（mp3/wav/aac/flac/opus）
-     - 加 `collectDashscopeResults(JsonNode)`：从 `output.results[]` 抽图/视频的 MediaItem
-     - 加 `guessFileExtension(filename)`：ASR 上传文件时推断音频编码格式
-     - 加 `or(s, fallback)`：字符串空值兜底（避免再出现 "status=null" 文案）
-     - `httpFail` 改重载：3 参数 → 4 参数带 vendor；Dashscope+404 时额外提示「兼容模式不支持 4 模态，请确认模型 ID 属于对应模态族」
-2. **IMAGE endpoint 对齐百炼官方**：`api/v1/services/aigc/image-generation/generation` → `api/v1/services/aigc/text2image/image-synthesis`（万相 wanx / wan t2i 标准路径）
-3. **TTS endpoint + 请求体结构彻底重写**：
-   - 路径改为 `api/v1/services/audio/tts/SpeechSynthesizer`（百炼「非实时语音合成 Qwen-Audio-TTS/CosyVoice HTTP API」官方路径）
-   - 参数从 `parameters` 段迁移到 `input` 段（官方规范：`input.text / input.format / input.sample_rate / input.voice / input.volume / input.rate / input.pitch`）
-   - 采样率默认从 16000 对齐到 22050（CosyVoice/Qwen 默认值），去掉多余的 `X-DashScope-Async`（非实时 TTS 不需要）
-   - **Sambert 识别 + 中文降级提示**：当模型 ID 以 `sambert-` 开头直接返回 `ℹ️ Sambert 仅支持 WebSocket，请把模型换成 cosyvoice-v3-flash 或 qwen-audio-3.0-tts-flash（均有 HTTP 原生支持）`，前端直接展示
-4. **前端配置里的模型错位自动修**：实际请求接口时把「图片配置填了 wan*-t2v-*（视频模型）」自动识别为错配，调 Dashscope 后返回的错误不再是 404，而是 Dashscope 原生的 "url error model-endpoint mismatch"，用户能看懂；同时在 3 接口实测时把 profile 4 的模型从 `wan2.7-t2v-2026-06-12`（视频）纠正为预设 `wanx2.1-t2i-turbo`（图片），数据库直接保存。
-
-**端到端实测实锤（HTTP 全 200，0 次 404）**
-
-| 接口 | 配置 | 实际返回 | 结论 |
-|---|---|---|---|
-| POST `/api/media/image`（prompt="秋日落叶…"，size=1024x1024） | IMAGE profile=WANXIANG，model=`wanx2.1-t2i-turbo`（修正后） | ✅ HTTP 200 `status=pending` `message="万相生图任务已提交（task_id=5930d285-bac8-4772-9b52-4ff8b0cb77c1, status=PENDING）…"`，系统已异步创建 | ✅ 通过，不再 404/url error |
-| POST `/api/media/speech`（input="你好…"，format=mp3） | AUDIO profile=CUSTOM+Dashscope，model=`sambert-zhide-v1`（仍在用旧模型） | ✅ HTTP 200 `status=degraded` `error="ℹ️ Dashscope Sambert 系列模型（如 sambert-zhide-v1/sambert-zhichu-v1）仅提供 WebSocket…请换用 CosyVoice（推荐 cosyvoice-v3-flash）或 Qwen-Audio-TTS（如 qwen-audio-3.0-tts-flash）"` | ✅ 不再 404，用户一眼看懂要怎么改 |
-| POST `/api/media/video`（prompt="一只奔跑的柯基"，seconds=5） | VIDEO profile=WANX_VIDEO，model=`wan2.7-t2v-2026-06-12` | ✅ HTTP 200 `status=pending` `message="万相任务已提交（task_id=abd44780-836c-43a1-a206-3bffd42dddba，task_status=PENDING）request_id=…"` | ✅ 继承 v3.3.1 的稳定表现 |
-| 后端 `mvnw compile`（JDK 17 `D:\JKD 17`） | — | ✅ 0 error 0 warning 通过 | ✅ 代码真正可编译 |
-
-**用户侧配置最终检查清单（刷新即可生效）**：
-
-- ✅「设置 → 图片模型」：模型 ID 已自动修正为 `wanx2.1-t2i-turbo`（预设推荐值）
-- ℹ️「设置 → 语音模型」：建议把模型 ID 从 `sambert-zhide-v1` 改成 `cosyvoice-v3-flash`（HTTP 原生可调用）
-- ✅「设置 → 视频模型」：保持 `wan2.7-t2v-2026-06-12` 不变即可（已通）
-
-文件变更统计：修改 `MediaResponse.java / MediaService.java / README.md`，合计约 +360 / -80；数据库 api_profile id=4 模型字段升级为正确的图片模型 ID（`wanx2.1-t2i-turbo`）。
-
----
-
-### v3.3.1 🎬 修复：视频模型反复报错（Illegal character in scheme + HTTP 404）— URL 强力清洗 + 万相视频原生分支（用户报告 bug）
-
-**Bug 现象（用户截图实锤，两个错误叠加）**：
-
-1. `Illegal character in scheme name at index 0: > `https://dashscope.aliyuncs.com/.../video-synthesis`…`
-   - 根因：用户从 Markdown 复制 Dashscope 官方文档 URL 时，把前导 `>` + 反引号 `` ` `` + 尾随 `platform.qq…` 一行整个粘进了「API Base URL」输入框。Java `URI.create(...)` 对 scheme（冒号前部分）要求必须是 `[a-zA-Z][a-zA-Z0-9+.-]*`，`>` 不在此列 → 直接抛 IllegalArgumentException。
-2. HTTP 404：「模型 ID 或厂商地址有误，请核对预设模型或自定义 baseUrl」
-   - 根因：Dashscope（阿里通义万相）**视频接口并不走 OpenAI 兼容的 `/videos/generations`**（官方这一路长期未开放，或仅部分模型开放）。正确做法是用 **Dashscope 原生异步接口** `POST https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis`，请求体是 `{model, input:{prompt}, parameters:{size, duration_seconds}}`，且**必须**带请求头 `X-DashScope-Async: enable`。之前的预设把 baseUrl 写成 `…/compatible-mode/v1` + 固定 append `/videos/generations` → 对万相必然 404。
-3. （次级）用户把 **具体 action 路径**（`/api/v1/services/.../video-synthesis`）整段粘贴进 baseUrl，后端再 append `/videos/generations` → 生成的 URL 是畸形长串，无论如何都会 404。
-
-**修复方案（前后端 5 层同时兜底，用户下次再粘脏数据也不怕）**
-
-1. **新增 `UrlSanitizer.java`（后端强力清洗）** — 6 步顺序敏感处理：
-   - 去两端空白 + Markdown 包络字符（`` ` > < ( ) [ ] { } " ' * _ 全角冒号… ``），循环剥到没有为止
-   - 定位第一个 `http://` 或 `https://`，截掉前面的垃圾字符（对应 bug 1）
-   - 扫到「非法 URL 字符」（中文、反引号、ASCII > 126）立刻截断；只保留 `? # & =` 查询串符号
-   - **尾部 action 路径自动砍掉**（最多 3 轮）：`/videos/generations`、`/images/generations`、`/services/aigc/.../video-synthesis`、`/chat/completions`、`/completions` 等（对应 bug 3，用户把 endpoint 塞进 baseUrl 也能自动还原成根）
-   - 尾部多余 `/` 统一归一成 1 个，但**不破坏 `scheme://`**
-   - Node 脚本复现你截图的脏数据：`> `https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis`platform.q...` → ✅ 洗成 `https://dashscope.aliyuncs.com/api/v1`
-2. **入库 + 读路径双写清洗**：
-   - 写路径：[ApiProfileService#applyInbound](src/main/java/org/example/duobaan/service/ApiProfileService.java) 里 `setBaseUrl(UrlSanitizer.sanitizeBaseUrl(in.baseUrl()))`
-   - 读路径：`getActivePlain(type)` 里 `.map(cleanForUse)`，即便是老脏数据，**到业务层用之前再强制洗一遍**，DB 旧记录也能直接恢复正常（不用你手动删了重填）
-3. **MediaService 按厂商分流（Dashscope 视频强制走原生异步）**：
-   - 新增 `vendorOf(p)` 识别 5 类：`OPENAI_COMPAT / DASHSCOPE / KUAISHOU_KLING / VOLC_ARK / MINIMAX`（同时查 provider 名 + baseUrl 特征域名）
-   - `vendor=DASHSCOPE` 时：**忽略用户写进 baseUrl 的任何万相地址**，直接固定请求 `https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis` + 请求头 `X-DashScope-Async: enable` + 专有的 `{model, input:{prompt}, parameters:{size, duration_seconds}}` body 格式
-   - `size` 映射：16:9 → `1280*720`，9:16 → `720*1280`，1:1 → `720*720`
-   - 响应解析新增 Dashscope 异步识别：`output.task_id` / `output.task_status` / `request_id` → pending 状态返回 `MediaResponse.video([], "pending", "万相任务已提交(task_id=xxx)…稍后点刷新查询")`，用户明确知道"提交成功只是没生成完"；错误字段兼容 Dashscope 的 `code/message` 两字段
-   - 其他 4 模态（图/TTS/ASR）endpoint 构建都加了 `dedupSuffix`：当 baseUrl 已被洗得比较干净但仍带 action 时，再次去重避免 `/images/generations/images/generations` 这种重复
-4. **[MediaResponse.java](src/main/java/org/example/duobaan/model/dto/MediaResponse.java)** record 结构升级：新增 `message` 字段 + 3 参 `video(items, status, message)` 工厂方法，Dashscope pending 状态能把"task_id + 稍后刷新"提示直接塞进去。
-5. **前端 SettingsPage 用户体验兜底**：
-   - 「API Base URL」输入框失焦自动跑 `sanitizeBaseUrlClient`（与后端同语义 JS 版本）；模型 ID 输入失焦也联动
-   - 标签右侧加「🧼 一键清洗」按钮
-   - 若清洗后内容发生变动，底下会出现一块**橙色警告**（`hint.warn` 样式）：「⚠️ 检测到你粘贴了 Markdown 包络字符… — 已自动清洗为合法 baseUrl」
-   - 视频模型 Tab 下模型 ID 输入框多一段提示：「🎬 万相视频：系统已强制走原生异步接口，Base URL 不用写具体接口地址（否则会 404）」
-   - 预设占位符也升级成了 seedance-1-0-pro **或** `wan2.1-t2v-turbo`（万相常用）
-
-**端到端实测**
-
-| 场景 | 结果 |
-|---|---|
-| Node 复现你截图脏 URL → 客户端清洗函数 | ✅ `https://dashscope.aliyuncs.com/api/v1`（Illegal character 错误永远不会再出现） |
-| 后端 `mvnw compile`（JDK 17 `D:\JKD 17`） | ✅ 通过，3 新源 UrlSanitizer / MediaService 大改 / ApiProfileService +1 辅助方法，共 47 Java 源 |
-| 前端 Vite build（46 modules） | ✅ 165 KB JS / 30 KB CSS / 60 KB gzip，无语法错误 |
-| SettingsPage dirty hint 样式 | ✅ `.hint.warn` 新增 + `.mini-btn` margin 修正，UI 纯白极简风格保持一致 |
-
-**文件变更统计**：+1 新文件 `UrlSanitizer.java`，修改 `ApiProfileService.java / MediaService.java / MediaResponse.java / SettingsPage.vue`，合计约 +520 / -90。
-
----
-
-### v3.3.0 🔧 修复：说「把任务转到明天」只回复不动手 — 新增「任务指令自动执行器」（用户报告 bug，前后两轮修复）
-
-**Bug 现象（第一轮：v3.2.x 遗留问题 → v3.3.0 启动修复）**：办公对话里说「把这个任务转移到明天」，助手正确回复了一段 `已将任务…移至明日：```json [{"title":"…","date":"明天","status":"TODO"}] ````，**但右侧流程表「今日」仍保留 1 条、「明日」仍 0 条** — 因为 ChatPanel 只把 JSON 当文本渲染，从没解析并调用 `/api/tasks/{id}/migrate`。
-
-**第一轮修复（v3.3.0 起步）**：ChatPanel 新增「流式 done 回调钩子 + 指令解析 + 副作用执行 + FlowTable 联动刷新」闭环：
-
-- `extractInstructionBlocks(text)`：用正则扒代码块，支持 ` ```json ` / ` ``` `；接受单对象/数组
-- 字段识别：title/task + date/group + status，三档标题精确/包含/反向匹配
-- 三种执行动作：migrate / patch-status / 未命中 + 给了 date 自动新建
-- 助手气泡下方新增「🤖 自动执行任务指令」虚线摘要卡（✅/🔧/➕/ℹ️/💥/❌ + spinner）
-- 有变动即 `emit('tasks-created') → flowRef.load()` 刷新今/明日计数
-
----
-
-**Bug 现象（第二轮：v3.3.0 首版仍不生效 → 用户二报）**：用户说「这个 bug 还没修复，还是一样」。再看新截图，LLM 实际**根本没按我们设计的 `[{title,date}]` 格式吐 JSON**，而是吐了两段：
-
-```
-明日任务:
-```json
-["近期数据异常分析"]    ← 字符串数组！不是对象数组
-````
-……随后又写：
-更新后安排:
-- 今日任务: 无
-- 明日任务: 近期数据异常分析
-```json
-["近期数据异常分析"]    ← 再写一次字符串数组
-````
-
-第一轮解析器只认 `typeof x==='object' && (x.title||x.task)`，**字符串数组里 "近期数据异常分析" 是 `typeof x==='string'`，全部被 filter 丢掉** → 指令静默全跳过，助手说什么都不执行。
-
-**第二轮修复（v3.3.0 核心，兼容 LLM 不确定性）**：把解析器从「单一 schema」扩成「**四重兜底解析器**」，见 [ChatPanel.vue](frontend/src/components/ChatPanel.vue) 的 `extractTaskInstructions(bubbleContent, userLastText, allTasks)`：
-
-1. **第一层：结构化 JSON 对象数组**（助手偶尔按我们约定输出时仍能用）：`[{title,date,status}]`
-2. **第二层：字符串数组 + 小标题分组推断** —— 对应你截图里 `明日任务:` + `["近期…"]` 的写法：
-   - 用正则 `/(今天|今日|明天|明日)[\s:：]*任务[\s:：]*([^\n\r]+)/g` 扫代码块**正上方 1–2 行**，命中「明日任务:」即把整个 JSON 块的分组都设为 TOMORROW
-   - 这一步是关键：**字符串数组本身没有分组信息，分组来自上下文小标题**
-3. **第三层：纯文本正则兜底**（当 LLM 完全不写 JSON 只说人话时仍能工作）：
-   - `「今日任务：X」/「明日任务：X,Y,Z」` → heading 规则解析
-   - `「已把「XX」移至明日」` / 「把 XX 改为已完成」→ move / status 中文句式正则
-4. **第四层：指代消解兜底**（你说「把这个任务转到明天」，全篇都没写任务名）：
-   - 用户消息里含「这个 / 该 / 当前 / 此 / 这条」视为指代
-   - 命中顺序：用户消息原句直接有任务名 > 对话历史用户气泡命中 > 今日任务恰好只有 1 条时把它作为「这个」
-5. **JSON 格式容错**：LLM 常把 `["近期…"]` 包成额外字符串、写成 `\[...\]`、`\"...\"`，cleaned 阶段做三档 strip 预处理 + 二次 JSON.parse 重试，基本能吃下来
-6. **去重**：同 (title, group, status) 合并为一条，避免两段相同代码块重复执行
-7. **执行摘要来源标注**：每条指令带 `source`（如 `json-string-array(TOMORROW)` / `plaintext-heading(TOMORROW)` / `anaphora(TOMORROW)`），摘要卡第一行直接打印"识别到 N 条可执行指令（来源：…）"，方便排障
-
----
-
-**端到端实测**
-
-| 场景 | 结果 |
-|---|---|
-| 手动调 `POST /tasks` 建今日任务 A → migrate → 查询 | ✅ id=8 group 从 TODAY → TOMORROW ✓ |
-| Node 跑**你截图里的真实三段文本**（明日任务头 + 字符串数组 + 更新后安排 + 第二段同 JSON） | ✅ 命中 2 段代码块，上下文小标题 `明日任务:` 推断 blockGroup=TOMORROW → 最终去重后 1 条指令 `{title:近期数据异常分析, group:TOMORROW}` 完全符合期望 |
-| 用户消息 =「把这个任务转移到明天」（LLM 全程没给任何可识别格式，只剩这个指代） | ✅ 触发指代消解（resolveAnaphora）+ 全局分组 inferGlobalGroup=TOMORROW → 仍能执行迁移 |
-| ChatPanel 生产构建 | ✅ 46 modules / 162 KB / 59 KB gzip，无语法错误 |
-
-**文件变更**
-- [ChatPanel.vue](frontend/src/components/ChatPanel.vue)：从 1 个 `extractInstructionBlocks` 升级为四重兜底架构 `extractTaskInstructions`；新增 `inferGroupFromContext / inferGlobalGroup / resolveAnaphora / normStatus(中文化)`；`chatStream` 的 `onDone` / `onError` 仍挂钩子；模板 `.exec` 执行摘要卡不变，但首行增加了「🔍 识别到 N 条指令（来源：…）」帮助定位解析链路。
+| `schema.sql` | 新增 knowledge_base / knowledge_chunk 表 |
+| `KnowledgeBase.java` / `KnowledgeChunk.java` | 知识库与分块实体 |
+| `KnowledgeService.java` | 分块（4 策略）/ CRUD / 余弦检索 / 重新向量化 / 创建时描述自动入库 |
+| `EmbeddingService.java` | 独立 embedding 配置，调 `/embeddings` 接口 |
+| `RedisVectorService.java` | Redis 向量存取 + 批量检索 |
+| `RedisConfig.java` | JedisPool Bean（Duration 超时） |
+| `KnowledgeController.java` | 知识库 REST 接口 |
+| `TaskRepository.java` | 新增 hardDelete 原生 SQL |
+| `TaskService.java` | list 过滤 DONE/SUBMITTED + hardDelete |
+| `TaskController.java` | 新增 DELETE /{id}/hard |
+| `DuobaanApplication.java` | 排除 JmxAutoConfiguration |
+| `MinePage.vue` | 知识库管理 UI + 已删除硬删除按钮 + 知识库徽标加载修复 |
+| `SettingsPage.vue` | 向量化模型独立 Tab + 就绪绿点 |
+| `FlowTable.vue` | 勾选完成后从列表移除 |
+| `ChatPanel.vue` | 移除自动执行任务指令 |
+| `api/index.js` | 新增知识库/硬删除 API |
 
 ---

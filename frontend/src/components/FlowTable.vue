@@ -34,6 +34,12 @@ async function toggle(t) {
   const next = t.status === 'DONE' ? 'TODO' : 'DONE'
   const updated = await patchTask(t.id, { status: next })
   Object.assign(t, updated)
+  // 标记为完成后，从流程表移除（只在「我的 → 已完成」可见）
+  if (next === 'DONE') {
+    const arr = targetArray()
+    const idx = arr.findIndex((x) => x.id === t.id)
+    if (idx >= 0) arr.splice(idx, 1)
+  }
 }
 
 async function move(t, group) {

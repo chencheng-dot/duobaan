@@ -58,6 +58,31 @@ CREATE TABLE IF NOT EXISTS `chat_message` (
     KEY `idx_chat_mode_created` (`mode`, `created_at` DESC, `id` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 知识库：RAG 检索的知识库集合
+CREATE TABLE IF NOT EXISTS `knowledge_base` (
+    `id`              BIGINT        NOT NULL AUTO_INCREMENT,
+    `name`            VARCHAR(200)  NOT NULL,
+    `description`     VARCHAR(1000) NULL,
+    `chunk_size`      INT           NOT NULL DEFAULT 500  COMMENT '分块目标长度（字符数）',
+    `chunk_overlap`   INT           NOT NULL DEFAULT 50   COMMENT '分块重叠长度（字符数）',
+    `split_strategy`  VARCHAR(20)   NOT NULL DEFAULT 'PARAGRAPH' COMMENT 'PARAGRAPH/SENTENCE/MARKDOWN/SIMPLE',
+    `created_at`      DATETIME(6)   NOT NULL,
+    PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 知识库分块：每个分块存一段文本 + 其向量（JSON float 数组）
+-- 检索采用后端内存余弦相似度（读取全部分块与查询向量比对），无需额外向量数据库
+CREATE TABLE IF NOT EXISTS `knowledge_chunk` (
+    `id`          BIGINT       NOT NULL AUTO_INCREMENT,
+    `kb_id`       BIGINT       NOT NULL,
+    `content`     MEDIUMTEXT   NOT NULL,
+    `embedding`   MEDIUMTEXT   NULL COMMENT '向量 JSON 数组，如 [0.1,0.2,...]；未配置 embedding 时为 NULL',
+    `chunk_index` INT          NOT NULL DEFAULT 0,
+    `created_at`  DATETIME(6)  NOT NULL,
+    PRIMARY KEY (`id`),
+    KEY `idx_knowledge_chunk_kb` (`kb_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 系统配置表：key-value 结构，存放大模型提供商等可运行时修改的配置
 CREATE TABLE IF NOT EXISTS `system_config` (
     `cfg_key`    VARCHAR(100)  NOT NULL,

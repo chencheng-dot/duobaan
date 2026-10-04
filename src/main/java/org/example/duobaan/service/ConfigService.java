@@ -102,6 +102,13 @@ public class ConfigService {
         map.put(ApiProfileType.WEATHER, List.of(
                 new ProviderPreset("QWEATHER", "和风天气", "", ""),
                 new ProviderPreset("CUSTOM", "自定义", "", "")));
+        // 向量化：独立配置（Base URL + Key + Model），不复用 LLM
+        map.put(ApiProfileType.EMBEDDING, List.of(
+                new ProviderPreset("QIANWEN_EMB", "千问 text-embedding", "https://dashscope.aliyuncs.com/compatible-mode/v1", "text-embedding-v3"),
+                new ProviderPreset("OPENAI_EMB", "OpenAI text-embedding", "https://api.openai.com/v1", "text-embedding-3-small"),
+                new ProviderPreset("DOUBAO_EMB", "豆包 text-embedding", "https://ark.cn-beijing.volces.com/api/v3", "text-embedding-250515"),
+                new ProviderPreset("DEEPSEEK_EMB", "DeepSeek text-embedding", "https://api.deepseek.com/v1", "deepseek-embedding-v3"),
+                new ProviderPreset("CUSTOM", "自定义", "", "")));
         return map;
     }
 

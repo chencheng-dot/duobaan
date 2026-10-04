@@ -6,13 +6,14 @@ import {
   listApiProfiles, createApiProfile, updateApiProfile, activateApiProfile, deleteApiProfile
 } from '../api'
 
-// ====================== 5 个 Tab 元数据（数据驱动 → 通用表单/保存/激活/删除）======================
+// ====================== 6 个 Tab 元数据（数据驱动 → 通用表单/保存/激活/删除）======================
 const TAB_DEFS = [
-  { key: 'text',    type: 'LLM',     label: '文本模型',   symbol: '💬', nameHint: '如 个人对话-4o' },
-  { key: 'image',   type: 'IMAGE',   label: '图片模型',   symbol: '🎨', nameHint: '如 DALL·E 3 官方' },
-  { key: 'audio',   type: 'AUDIO',   label: '语音模型',   symbol: '🎵', nameHint: '如 TTS+Whisper' },
-  { key: 'video',   type: 'VIDEO',   label: '视频模型',   symbol: '🎬', nameHint: '如 Seedance 官方' },
-  { key: 'weather', type: 'WEATHER', label: '天气服务',   symbol: '⛅', nameHint: '如 默认北京' }
+  { key: 'text',      type: 'LLM',       label: '文本模型',   symbol: '💬', nameHint: '如 个人对话-4o' },
+  { key: 'image',     type: 'IMAGE',     label: '图片模型',   symbol: '🎨', nameHint: '如 DALL·E 3 官方' },
+  { key: 'audio',     type: 'AUDIO',     label: '语音模型',   symbol: '🎵', nameHint: '如 TTS+Whisper' },
+  { key: 'video',     type: 'VIDEO',     label: '视频模型',   symbol: '🎬', nameHint: '如 Seedance 官方' },
+  { key: 'embedding', type: 'EMBEDDING', label: '向量化模型', symbol: '🧮', nameHint: '如 千问 text-embedding' },
+  { key: 'weather',   type: 'WEATHER',   label: '天气服务',   symbol: '⛅', nameHint: '如 默认北京' }
 ]
 const tab = ref('text')
 const activeTab = computed(() => TAB_DEFS.find(t => t.key === tab.value))
@@ -28,14 +29,16 @@ function makeGenericState() {
   })
 }
 const g = reactive({
-  text:  makeGenericState(),
-  image: makeGenericState(),
-  audio: makeGenericState({ timeoutSeconds: 180 }),   // 视频型态默认给 180s，但 audio 这里覆盖 30
-  video: makeGenericState()
+  text:      makeGenericState(),
+  image:     makeGenericState(),
+  audio:     makeGenericState({ timeoutSeconds: 180 }),   // 视频型态默认给 180s，但 audio 这里覆盖 30
+  video:     makeGenericState(),
+  embedding: makeGenericState()
 })
 // audio/viedo 默认 timeout 修正
 g.audio.form.timeoutSeconds = 30
 g.video.form.timeoutSeconds = 180
+g.embedding.form.timeoutSeconds = 30
 
 // 天气独立（字段不一样：apiHost / location / cacheTtl）
 const weather = reactive({
@@ -136,9 +139,9 @@ const currentProviders = computed(() => providersAll.value[currentType.value] ||
 async function loadAll() {
   try {
     loading.value = true
-    // 并行：拉所有 providersAll + 5 种 profiles + 旧 config（回填到天气/文本）
+    // 并行：拉所有 providersAll + 6 种 profiles + 旧 config（回填到天气/文本）
     const [allProv, llmCfgOld, wthCfgOld,
-      textList, imgList, audList, vidList, wthList] = await Promise.all([
+      textList, imgList, audList, vidList, embList, wthList] = await Promise.all([
         getAllProviders(),
         getLlmConfig().catch(() => null),
         getWeatherConfig().catch(() => null),
@@ -146,6 +149,7 @@ async function loadAll() {
         listApiProfiles('IMAGE').catch(() => []),
         listApiProfiles('AUDIO').catch(() => []),
         listApiProfiles('VIDEO').catch(() => []),
+        listApiProfiles('EMBEDDING').catch(() => []),
         listApiProfiles('WEATHER').catch(() => [])
       ])
     providersAll.value = allProv || {}
@@ -179,6 +183,12 @@ async function loadAll() {
     applyPresetTo('video', (providersAll.value.VIDEO || [])[0]?.code, true)
     g.video.profiles = vidList
     applyActiveTo('video', vidList)
+
+    // ---- 向量化默认 ----
+    g.embedding.form.timeoutSeconds = 30
+    applyPresetTo('embedding', (providersAll.value.EMBEDDING || [])[0]?.code, true)
+    g.embedding.profiles = embList
+    applyActiveTo('embedding', embList)
 
     // ---- 天气 ----
     if (wthCfgOld) {
@@ -398,11 +408,12 @@ async function confirmDelete() {
 
 // Tab 上的"绿点"表示某一类已经有 active profile
 const readyState = computed(() => ({
-  text:    g.text.profiles.some(p => p.isActive),
-  image:   g.image.profiles.some(p => p.isActive),
-  audio:   g.audio.profiles.some(p => p.isActive),
-  video:   g.video.profiles.some(p => p.isActive),
-  weather: weather.profiles.some(p => p.isActive)
+  text:      g.text.profiles.some(p => p.isActive),
+  image:     g.image.profiles.some(p => p.isActive),
+  audio:     g.audio.profiles.some(p => p.isActive),
+  video:     g.video.profiles.some(p => p.isActive),
+  embedding: g.embedding.profiles.some(p => p.isActive),
+  weather:   weather.profiles.some(p => p.isActive)
 }))
 
 watch(errorMsg, (v) => { if (v) setTimeout(() => { errorMsg.value = '' }, 5000) })
@@ -415,7 +426,6 @@ onMounted(loadAll)
     <section class="title-row">
       <div class="title-text">
         <h1>系统设置</h1>
-        <p class="sub">配置 4 类多模态模型（文本/图片/语音/视频）+ 天气服务</p>
       </div>
       <div class="title-line"></div>
     </section>
@@ -484,7 +494,7 @@ onMounted(loadAll)
         <div class="config-item">
           <label class="lbl">模型 ID</label>
           <input v-model="currentGeneric.form.model"
-                 :placeholder="activeTab.type==='IMAGE'?'如 dall-e-3':activeTab.type==='AUDIO'?'如 tts-1':activeTab.type==='VIDEO'?'如 seedance-1-0-pro 或 wan2.1-t2v-turbo':'如 gpt-4o-mini'"
+                 :placeholder="activeTab.type==='IMAGE'?'如 dall-e-3':activeTab.type==='AUDIO'?'如 tts-1':activeTab.type==='VIDEO'?'如 seedance-1-0-pro 或 wan2.1-t2v-turbo':activeTab.type==='EMBEDDING'?'如 text-embedding-v3（千问）':'如 gpt-4o-mini'"
                  @input="currentGeneric.saved = false" @blur="cleanCurrentBaseUrl(tab)" />
           <p class="hint" v-if="currentProviders.find(q => q.code === currentGeneric.form.providerCode)?.defaultModel">
             推荐：{{ currentProviders.find(q => q.code === currentGeneric.form.providerCode).defaultModel }}

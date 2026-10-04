@@ -87,7 +87,10 @@ public class TaskService {
 
     public List<Task> list(TaskGroup group) {
         ensureRollover();
-        return repo.findByGroupOrderByCreatedAtAsc(group);
+        // 流程表只显示待办/进行中；已完成(DONE)和已上交(SUBMITTED)的任务只在「我的」页可见
+        return repo.findByGroupOrderByCreatedAtAsc(group).stream()
+                .filter(t -> t.getStatus() != TaskStatus.DONE && t.getStatus() != TaskStatus.SUBMITTED)
+                .toList();
     }
 
     @Transactional
@@ -176,13 +179,22 @@ public class TaskService {
         return new TaskSummary(submitted.size(), remaining.size(), submitted, remaining);
     }
 
-    /** 删除任务 */
+    /** 删除任务（软删除：标记 deleted=1，保留在「我的 → 已删除」留痕） */
     @Transactional
     public void delete(Long id) {
         if (!repo.existsById(id)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在: " + id);
         }
         repo.deleteById(id);
+    }
+
+    /** 硬删除：物理删除行，不可恢复。供「我的 → 已删除」中的彻底删除使用。 */
+    @Transactional
+    public void hardDelete(Long id) {
+        int rows = repo.hardDelete(id);
+        if (rows == 0) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在: " + id);
+        }
     }
 
     public Task get(Long id) {

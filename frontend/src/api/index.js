@@ -21,6 +21,7 @@ export const patchTask = (id, body) => json(`${BASE}/tasks/${id}`, { method: 'PA
 export const migrateTask = (id, group) => json(`${BASE}/tasks/${id}/migrate?group=${group}`, { method: 'POST', body: '{}' })
 export const submitTasks = () => json(`${BASE}/tasks/submit`, { method: 'POST', body: '{}' })
 export const deleteTask = (id) => fetch(`${BASE}/tasks/${id}`, { method: 'DELETE' })
+export const hardDeleteTask = (id) => fetch(`${BASE}/tasks/${id}/hard`, { method: 'DELETE' })
 
 export const chat = (message, mode) =>
   json(`${BASE}/llm/chat`, { method: 'POST', body: JSON.stringify({ message, mode }) })
@@ -160,3 +161,26 @@ export const pollTask = ({ taskId, profileId, kind }) =>
 
 // === 我的：任务历史 ===
 export const getMineHistory = () => json(`${BASE}/tasks/mine`)
+
+// === 知识库（RAG） ===
+export const listKbs = () => json(`${BASE}/knowledge/bases`)
+export const createKb = (body) => json(`${BASE}/knowledge/bases`, { method: 'POST', body: JSON.stringify(body) })
+export const deleteKb = (id) => fetch(`${BASE}/knowledge/bases/${id}`, { method: 'DELETE' })
+export const addKbDocument = (id, text) =>
+  json(`${BASE}/knowledge/bases/${id}/documents`, { method: 'POST', body: JSON.stringify({ text }) })
+export const uploadKbDocument = async (id, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  const res = await fetch(`${BASE}/knowledge/bases/${id}/upload`, { method: 'POST', body: fd })
+  if (!res.ok) {
+    const txt = await res.text().catch(() => res.statusText)
+    throw new Error(`${res.status} ${txt}`)
+  }
+  return res.json()
+}
+export const listKbChunks = (id) => json(`${BASE}/knowledge/bases/${id}/chunks`)
+export const clearKbChunks = (id) => json(`${BASE}/knowledge/bases/${id}/chunks`, { method: 'DELETE' })
+export const revectorizeKb = (id) => json(`${BASE}/knowledge/bases/${id}/revectorize`, { method: 'POST' })
+export const getKnowledgeStatus = () => json(`${BASE}/knowledge/status`)
+export const searchKnowledge = (query) =>
+  json(`${BASE}/knowledge/search`, { method: 'POST', body: JSON.stringify({ query }) })

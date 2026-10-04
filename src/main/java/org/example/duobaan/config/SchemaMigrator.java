@@ -38,6 +38,7 @@ public class SchemaMigrator {
             migrateTaskTable(dbName);
             migrateChatMessageTable(dbName);
             migrateApiProfileTable(dbName);
+            migrateKnowledgeBaseTable(dbName);
         } catch (Exception e) {
             // 升级失败不阻止启动（全新数据库列已在 schema.sql 建好，这里只是兼容旧库）
             log.warn("[SchemaMigrator] 迁移过程发生异常，跳过（全新库可忽略）：{}", e.getMessage());
@@ -111,6 +112,28 @@ public class SchemaMigrator {
                     + "MODIFY COLUMN `profile_type` VARCHAR(20) NOT NULL "
                     + "COMMENT 'LLM=文本对话 IMAGE=文生图 AUDIO=TTS+ASR VIDEO=文生视频 WEATHER=天气'");
             log.info("[SchemaMigrator] api_profile.profile_type 已从 ENUM 升级为 VARCHAR(20)，支持多模态类型扩展");
+        }
+    }
+
+    /**
+     * knowledge_base 表：补齐分块配置列（chunk_size / chunk_overlap / split_strategy）。
+     * 全新库由 schema.sql 直接建好，这里只兼容旧库。
+     */
+    private void migrateKnowledgeBaseTable(String dbName) {
+        if (!columnExists(dbName, "knowledge_base", "chunk_size")) {
+            jdbc.execute("ALTER TABLE `knowledge_base` "
+                    + "ADD COLUMN `chunk_size` INT NOT NULL DEFAULT 500 COMMENT '分块目标长度（字符数）' AFTER `description`");
+            log.info("[SchemaMigrator] knowledge_base.chunk_size 列已添加");
+        }
+        if (!columnExists(dbName, "knowledge_base", "chunk_overlap")) {
+            jdbc.execute("ALTER TABLE `knowledge_base` "
+                    + "ADD COLUMN `chunk_overlap` INT NOT NULL DEFAULT 50 COMMENT '分块重叠长度（字符数）' AFTER `chunk_size`");
+            log.info("[SchemaMigrator] knowledge_base.chunk_overlap 列已添加");
+        }
+        if (!columnExists(dbName, "knowledge_base", "split_strategy")) {
+            jdbc.execute("ALTER TABLE `knowledge_base` "
+                    + "ADD COLUMN `split_strategy` VARCHAR(20) NOT NULL DEFAULT 'PARAGRAPH' COMMENT 'PARAGRAPH/SENTENCE/MARKDOWN/SIMPLE' AFTER `chunk_overlap`");
+            log.info("[SchemaMigrator] knowledge_base.split_strategy 列已添加");
         }
     }
 

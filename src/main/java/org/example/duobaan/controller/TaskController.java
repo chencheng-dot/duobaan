@@ -74,6 +74,12 @@ public class TaskController {
         taskService.delete(id);
     }
 
+    /** 硬删除：物理删除已软删除的任务行，不可恢复 */
+    @DeleteMapping("/{id}/hard")
+    public void hardDelete(@PathVariable Long id) {
+        taskService.hardDelete(id);
+    }
+
     /**
      * 「我的」任务历史：已上交 / 已完成 / 已删除 三栏数据。
      * - 已上交：status=SUBMITTED（今日上交小结 → 工作留痕）
