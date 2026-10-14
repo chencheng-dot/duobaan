@@ -22,23 +22,19 @@ const activeTab = computed(() => TAB_DEFS.find(t => t.key === tab.value))
 const providersAll = ref({})
 
 // 每个普通 Tab（前 4 个 = 非天气）一份响应式状态
-function makeGenericState() {
+function makeGenericState({ timeoutSeconds = 30 } = {}) {
   return reactive({
-    form: { name: '', providerCode: '', baseUrl: '', apiKey: '', model: '', timeoutSeconds: 30 },
+    form: { name: '', providerCode: '', baseUrl: '', apiKey: '', model: '', timeoutSeconds },
     saving: false, saved: false, editingId: null, profiles: []
   })
 }
 const g = reactive({
   text:      makeGenericState(),
   image:     makeGenericState(),
-  audio:     makeGenericState({ timeoutSeconds: 180 }),   // 视频型态默认给 180s，但 audio 这里覆盖 30
-  video:     makeGenericState(),
+  audio:     makeGenericState(),                            // 语音：默认 30s
+  video:     makeGenericState({ timeoutSeconds: 180 }),     // 视频：默认 180s
   embedding: makeGenericState()
 })
-// audio/viedo 默认 timeout 修正
-g.audio.form.timeoutSeconds = 30
-g.video.form.timeoutSeconds = 180
-g.embedding.form.timeoutSeconds = 30
 
 // 天气独立（字段不一样：apiHost / location / cacheTtl）
 const weather = reactive({
@@ -114,7 +110,7 @@ function normalizeApiHost(v) {
 function isValidApiHost(s) {
   return /^[a-z0-9][a-z0-9.-]*(:\d+)?$/i.test(normalizeApiHost(s))
 }
-function cleanCurrentBaseUrl(tabKey, warnDirtyToo = true) {
+function cleanCurrentBaseUrl(tabKey) {
   if (!tabKey || !g[tabKey]) return
   const st = g[tabKey]
   const orig = st.form.baseUrl || ''
@@ -652,7 +648,7 @@ onMounted(loadAll)
         </div>
         <div class="config-item">
           <label class="lbl">API Host <span class="required">*</span></label>
-          <input v-model="weather.form.apiHost" placeholder="例如：abc123xyz.def.qweatherapi.com（可带 https:// 前缀，不要带路径）" @input="weather.saved = false" />
+          <input v-model="weather.form.apiHost" placeholder="例如：abc123xyz.def.qweatherapi.com（可带 https:// 前缀，不要带路径）" @input="weather.saved = false" @blur="cleanWeatherHost" />
           <p class="hint">
             <strong>和风自 2026 年起停用了旧公共域名（geoapi/devapi/api.qweather.com，全部返回 404）</strong>。
             请在 <code>console.qweather.com → 设置 → API Host</code> 页面复制你的<strong>个人专属 Host</strong>（形如

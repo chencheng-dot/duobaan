@@ -176,7 +176,7 @@ export const getMineHistory = () => json(`${BASE}/tasks/mine`)
 // === 知识库（RAG） ===
 export const listKbs = () => json(`${BASE}/knowledge/bases`)
 export const createKb = (body) => json(`${BASE}/knowledge/bases`, { method: 'POST', body: JSON.stringify(body) })
-export const deleteKb = (id) => fetch(`${BASE}/knowledge/bases/${id}`, { method: 'DELETE' })
+export const deleteKb = (id) => json(`${BASE}/knowledge/bases/${id}`, { method: 'DELETE' })
 export const addKbDocument = (id, text) =>
   json(`${BASE}/knowledge/bases/${id}/documents`, { method: 'POST', body: JSON.stringify({ text }) })
 export const uploadKbDocument = async (id, file) => {

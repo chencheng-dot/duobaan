@@ -19,10 +19,10 @@ import org.springframework.stereotype.Repository;
 @Repository
 public interface TaskHistoryRepository extends JpaRepository<Task, Long> {
 
-    /** 已上交任务：status=SUBMITTED，按上交时间倒序（最新上交的在最前） */
+    /** 已上交且未删除任务：status=SUBMITTED 且 deleted=0，按上交时间倒序（最新上交的在最前） */
     @Query(value = """
             SELECT * FROM task
-            WHERE task_status = 'SUBMITTED'
+            WHERE task_status = 'SUBMITTED' AND deleted = 0
             ORDER BY COALESCE(submitted_at, created_at) DESC
             LIMIT :limit
             """, nativeQuery = true)

@@ -27,6 +27,11 @@ public class RecommendController {
 
     @PostMapping("/meal")
     public ChatResponse recommend(@RequestBody MealContext ctx) {
+        // 空 body 会先被框架拦成 400，走不到这里；但请求体字面为 null 时 Jackson 会反序列化成 null，
+        // 放行会让 RecommendService 的 ctx.summary() 直接 NPE → 500，故在边界拦成 400 + 中文文案。
+        if (ctx == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请求内容不能为空");
+        }
         return recommendService.recommend(ctx);
     }
 
