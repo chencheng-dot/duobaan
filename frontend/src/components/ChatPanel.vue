@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import {
   chatStream,
   parseTasks,
@@ -179,7 +179,7 @@ async function sendTextLLM(text) {
   messages.value.push({ id: nextMsgId(), role: 'user', content: text })
   input.value = ''
   loading.value = true
-  const bubble = { id: nextMsgId(), role: 'assistant', content: '', streaming: true }
+  const bubble = reactive({ id: nextMsgId(), role: 'assistant', content: '', streaming: true })
   messages.value.push(bubble)
   await scrollToBottom()
 
@@ -224,7 +224,7 @@ async function doImage(prompt) {
   loading.value = true
   messages.value.push({ id: nextMsgId(), role: 'user', content: '【文生图】' + prompt })
   input.value = ''
-  const bubble = { id: nextMsgId(), role: 'assistant', content: '🎨 生图中，请稍候…', loading: true }
+  const bubble = reactive({ id: nextMsgId(), role: 'assistant', content: '🎨 生图中，请稍候…', loading: true })
   messages.value.push(bubble)
   await scrollToBottom()
   try {
@@ -274,7 +274,9 @@ function startPolling(bubble, taskId, profileId, kind) {
       if (res.status === 'succeeded' && res.items && res.items.length) {
         clearInterval(timer)
         activePollers.delete(bubble)
-        bubble.content = '🎨 生成完成（点击图片可新标签页打开）'
+        bubble.content = kind === 'VIDEO'
+          ? '🎬 视频生成完成（点击可在新标签页播放）'
+          : '🎨 生成完成（点击图片可新标签页打开）'
         bubble.rich = { kind, payload: res, text: bubble.content }
         // 结果只在本地 state 里生效；不在这里发 GET /api/llm/history
         // （GET 没有写入能力，既不能"同步到后端数据库"，也只会白白多一次请求）。
@@ -307,7 +309,7 @@ async function doTTS(text) {
   loading.value = true
   messages.value.push({ id: nextMsgId(), role: 'user', content: '【朗读】' + text })
   input.value = ''
-  const bubble = { id: nextMsgId(), role: 'assistant', content: '🔊 合成语音中…', loading: true }
+  const bubble = reactive({ id: nextMsgId(), role: 'assistant', content: '🔊 合成语音中…', loading: true })
   messages.value.push(bubble)
   await scrollToBottom()
   try {
@@ -347,7 +349,7 @@ async function runASR() {
   const theName = asrFileName.value
   loading.value = true
   messages.value.push({ id: nextMsgId(), role: 'user', content: '【语音转写】' + theName })
-  const bubble = { id: nextMsgId(), role: 'assistant', content: '🎙 转写中…', loading: true }
+  const bubble = reactive({ id: nextMsgId(), role: 'assistant', content: '🎙 转写中…', loading: true })
   messages.value.push(bubble)
   asrFile.value = null
   asrFileName.value = ''
@@ -377,7 +379,7 @@ async function doVideo(prompt) {
   loading.value = true
   messages.value.push({ id: nextMsgId(), role: 'user', content: '【文生视频】' + prompt })
   input.value = ''
-  const bubble = { id: nextMsgId(), role: 'assistant', content: '🎬 视频生成中（较慢约 1~3 分钟）…', loading: true }
+  const bubble = reactive({ id: nextMsgId(), role: 'assistant', content: '🎬 视频生成中（较慢约 1~3 分钟）…', loading: true })
   messages.value.push(bubble)
   await scrollToBottom()
   try {

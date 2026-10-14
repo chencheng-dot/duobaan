@@ -33,6 +33,9 @@ public class ConfigController {
     /** 旧 /config/llm 接口保存的自动配置名 */
     private static final String AUTO_LLM_NAME = "系统自动保存-LLM";
 
+    /** 旧 /config/weather 接口保存的自动配置名 */
+    private static final String AUTO_WEATHER_NAME = "系统自动保存-WEATHER";
+
     private final ConfigService configService;   // 保留：/providers 仍在此
     private final ApiProfileService apiProfileService;
     private final DuobaanProperties props;
@@ -177,13 +180,21 @@ public class ConfigController {
 
     @PostMapping("/weather")
     public WeatherConfigDTO saveWeatherConfig(@RequestBody WeatherConfigDTO dto) {
+        // 与 saveLlmConfig 同一处理：旧行为每次都新建 profile，长期使用会堆积大量同名「系统自动保存-WEATHER」。
+        // 现改为：已存在同名自动配置则原地更新它（空 Key 会保留原 Key），否则才新建。请新前端改用 /api/config/profiles。
         ApiProfileInbound in = new ApiProfileInbound(
-                ApiProfileType.WEATHER, "系统自动保存-WEATHER",
+                ApiProfileType.WEATHER, AUTO_WEATHER_NAME,
                 "qweather", dto.apiHost(), null, dto.apiKey(),
                 dto.location(), dto.cacheTtlSeconds(), null, true);
-        ApiProfileDTO created = apiProfileService.create(in);
+        Optional<Long> existingId = apiProfileService.list(ApiProfileType.WEATHER).stream()
+                .filter(p -> AUTO_WEATHER_NAME.equals(p.name()))
+                .map(ApiProfileDTO::id)
+                .findFirst();
+        ApiProfileDTO saved = existingId
+                .map(id -> apiProfileService.update(id, in))
+                .orElseGet(() -> apiProfileService.create(in));
         return new WeatherConfigDTO(
-                created.provider(), created.baseUrl(), "",
-                created.location(), created.cacheTtlSeconds() == null ? 600L : created.cacheTtlSeconds());
+                saved.provider(), saved.baseUrl(), "",
+                saved.location(), saved.cacheTtlSeconds() == null ? 600L : saved.cacheTtlSeconds());
     }
 }
