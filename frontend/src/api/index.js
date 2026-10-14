@@ -1,16 +1,25 @@
 // 后端 REST 客户端：时间 / 天气 / 流程表 / 大模型对话 / 餐食推荐
 const BASE = '/api'
 
+// 非全局正则没有 lastIndex 状态，循环里可以安全地对不断变短的 buf 反复匹配（带 g 会越过紧邻分隔符合并多个事件）
+const SSE_SEP = /\r?\n\r?\n/
+
 async function json(url, opts = {}) {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...opts
   })
+  if (res.status === 204) return null
+  const ct = res.headers.get('content-type') || ''
   if (!res.ok) {
-    const txt = await res.text().catch(() => res.statusText)
-    throw new Error(`${res.status} ${txt}`)
+    let msg = res.statusText
+    if (ct.includes('json')) {
+      const body = await res.json().catch(() => null)
+      msg = body?.message || msg
+    }
+    throw new Error(`[${res.status}] ${msg}`)
   }
-  return res.json()
+  return ct.includes('json') ? res.json() : null
 }
 
 export const getTime = () => json(`${BASE}/time/now`)
@@ -20,8 +29,8 @@ export const createTask = (body) => json(`${BASE}/tasks`, { method: 'POST', body
 export const patchTask = (id, body) => json(`${BASE}/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
 export const migrateTask = (id, group) => json(`${BASE}/tasks/${id}/migrate?group=${group}`, { method: 'POST', body: '{}' })
 export const submitTasks = () => json(`${BASE}/tasks/submit`, { method: 'POST', body: '{}' })
-export const deleteTask = (id) => fetch(`${BASE}/tasks/${id}`, { method: 'DELETE' })
-export const hardDeleteTask = (id) => fetch(`${BASE}/tasks/${id}/hard`, { method: 'DELETE' })
+export const deleteTask = (id) => json(`${BASE}/tasks/${id}`, { method: 'DELETE' })
+export const hardDeleteTask = (id) => json(`${BASE}/tasks/${id}/hard`, { method: 'DELETE' })
 
 export const chat = (message, mode) =>
   json(`${BASE}/llm/chat`, { method: 'POST', body: JSON.stringify({ message, mode }) })
@@ -33,58 +42,63 @@ export const chat = (message, mode) =>
  */
 export function chatStream(message, mode, { onDelta, onDone, onError } = {}) {
   const ctrl = new AbortController()
-  fetch(`${BASE}/llm/chat/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ message, mode }),
-    signal: ctrl.signal
-  })
-    .then(async (res) => {
-      if (!res.ok) {
-        const txt = await res.text().catch(() => res.statusText)
-        throw new Error(`${res.status} ${txt}`)
-      }
-      const reader = res.body.getReader()
+  let finished = false
+
+  ;(async () => {
+    let reader
+    try {
+      const res = await fetch(`${BASE}/llm/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify({ message, mode }),
+        signal: ctrl.signal
+      })
+      if (!res.ok) throw new Error(`[${res.status}] ${await res.text().catch(() => res.statusText)}`)
+
+      reader = res.body.getReader()
       const decoder = new TextDecoder('utf-8')
       let buf = ''
       while (true) {
         const { value, done } = await reader.read()
         if (done) break
         buf += decoder.decode(value, { stream: true })
-        // 按 SSE 协议切分：空行分隔事件
-        let idx
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-          const raw = buf.slice(0, idx)
-          buf = buf.slice(idx + 2)
-          handleSse(raw, { onDelta, onDone, onError })
+        while (true) {
+          const m = SSE_SEP.exec(buf)
+          if (!m) break
+          const raw = buf.slice(0, m.index)
+          buf = buf.slice(m.index + m[0].length)
+          if (handleSse(raw, { onDelta, onError, onDone: () => { finished = true; onDone?.() } })) break
         }
+        if (finished) break
       }
-      // 处理尾部残留
-      if (buf.trim()) handleSse(buf, { onDelta, onDone, onError })
-      if (onDone) onDone()
-    })
-    .catch((e) => {
-      if (e.name === 'AbortError') return
-      if (onError) onError(e.message || String(e))
-    })
-  return () => ctrl.abort()
+      buf += decoder.decode()                       // 冲刷解码器残留字节
+      if (buf.trim()) handleSse(buf, { onDelta, onError, onDone: () => { finished = true; onDone?.() } })
+      if (!finished) onDone?.()                     // 服务端未发 done 时补一次，且只补一次
+    } catch (e) {
+      if (e.name === 'AbortError') onDone?.()        // 主动停止也算结束，避免永久 loading
+      else onError?.(e.message || String(e))
+    } finally {
+      try { await reader?.cancel() } catch (_) { /* 忽略 */ }
+    }
+  })()
+
+  return () => { finished = true; ctrl.abort() }
 }
 
+/** 解析一个 SSE 事件块；返回 true 表示收到终态事件（done/error） */
 function handleSse(raw, { onDelta, onDone, onError } = {}) {
-  // 解析 SSE 事件块：event: name\ndata: payload
   let eventName = 'message'
   const dataLines = []
   for (const line of raw.split('\n')) {
-    if (line.startsWith('event:')) {
-      eventName = line.slice(6).trim()
-    } else if (line.startsWith('data:')) {
-      dataLines.push(line.slice(5).replace(/^ /, ''))
-    }
+    const l = line.replace(/\r$/, '')
+    if (l.startsWith('event:')) eventName = l.slice(6).trim()
+    else if (l.startsWith('data:')) dataLines.push(l.slice(5).replace(/^ /, ''))
   }
   const data = dataLines.join('\n')
-  if (eventName === 'delta' && onDelta) onDelta(data)
-  else if (eventName === 'done' && onDone) onDone()
-  else if (eventName === 'error' && onError) onError(data)
+  if (eventName === 'delta') { onDelta?.(data); return false }
+  if (eventName === 'done') { onDone?.(); return true }
+  if (eventName === 'error') { onError?.(data); return true }
+  return false
 }
 
 /** 拆单：自然语言 → 结构化任务列表 */
@@ -109,7 +123,6 @@ export const adoptMeal = (mealTitle) =>
 export const getLlmConfig = () => json(`${BASE}/config/llm`)
 export const saveLlmConfig = (dto) =>
   json(`${BASE}/config/llm`, { method: 'POST', body: JSON.stringify(dto) })
-export const getProviders = () => json(`${BASE}/config/providers`)
 
 // === 天气配置 ===
 export const getWeatherConfig = () => json(`${BASE}/config/weather`)
@@ -118,8 +131,6 @@ export const saveWeatherConfig = (dto) =>
 
 // === 多套 API 配置（/api/config/profiles 家族） ===
 export const listApiProfiles = (type) => json(`${BASE}/config/profiles?type=${type}`)
-export const getActiveApiProfile = (type) =>
-  fetch(`${BASE}/config/profiles/active?type=${type}`).then(r => r.status === 204 ? null : r.json())
 export const getApiProfile = (id) => json(`${BASE}/config/profiles/${id}`)
 export const createApiProfile = (payload) =>
   json(`${BASE}/config/profiles`, { method: 'POST', body: JSON.stringify(payload) })
@@ -182,5 +193,3 @@ export const listKbChunks = (id) => json(`${BASE}/knowledge/bases/${id}/chunks`)
 export const clearKbChunks = (id) => json(`${BASE}/knowledge/bases/${id}/chunks`, { method: 'DELETE' })
 export const revectorizeKb = (id) => json(`${BASE}/knowledge/bases/${id}/revectorize`, { method: 'POST' })
 export const getKnowledgeStatus = () => json(`${BASE}/knowledge/status`)
-export const searchKnowledge = (query) =>
-  json(`${BASE}/knowledge/search`, { method: 'POST', body: JSON.stringify({ query }) })

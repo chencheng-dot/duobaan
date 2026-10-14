@@ -2,7 +2,7 @@
 import { ref, onMounted, computed, reactive, watch } from 'vue'
 import {
   getLlmConfig, saveLlmConfig, getAllProviders,
-  getWeatherConfig, saveWeatherConfig,
+  getWeatherConfig,
   listApiProfiles, createApiProfile, updateApiProfile, activateApiProfile, deleteApiProfile
 } from '../api'
 
@@ -102,6 +102,18 @@ function sanitizeBaseUrlClient(raw) {
   }
   return s.trim()
 }
+/** baseUrl 格式校验：必须以 http:// 或 https:// 开头，且不含空白字符 */
+function isValidBaseUrl(s) {
+  return /^https?:\/\/[^\s]+$/i.test(String(s || '').trim())
+}
+/** 天气 API Host 归一化：去掉 scheme 与尾部斜杠，保持与后端 WeatherService 的契约一致（scheme 可选、允许尾斜杠） */
+function normalizeApiHost(v) {
+  return String(v || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+}
+/** 天气 API Host 校验：去掉 scheme 与尾斜杠后再校验主机名（可带端口），不接受路径（和风 Host 形如 xxx.def.qweatherapi.com） */
+function isValidApiHost(s) {
+  return /^[a-z0-9][a-z0-9.-]*(:\d+)?$/i.test(normalizeApiHost(s))
+}
 function cleanCurrentBaseUrl(tabKey, warnDirtyToo = true) {
   if (!tabKey || !g[tabKey]) return
   const st = g[tabKey]
@@ -134,6 +146,28 @@ const currentGeneric = computed(() => {
 })
 const currentType = computed(() => activeTab.value?.type)
 const currentProviders = computed(() => providersAll.value[currentType.value] || [])
+
+// 正在编辑的配置「已保存的 Key（打码版）」，只用于给用户看当前生效的是哪把 Key。
+// 输入框始终保持为空 = 不修改，绝不把打码值塞进输入框（塞了就会被当真 Key 提交）。
+const editingMaskedKey = computed(() => {
+  const s = currentGeneric.value
+  if (!s || !s.editingId) return ''
+  const p = s.profiles.find(q => q.id === s.editingId)
+  return p ? (p.apiKeyMasked || '') : ''
+})
+const weatherEditingMaskedKey = computed(() => {
+  if (!weather.editingId) return ''
+  const p = weather.profiles.find(q => q.id === weather.editingId)
+  return p ? (p.apiKeyMasked || '') : ''
+})
+
+/** 与后端 ApiProfileService.isMaskedKey 同一判定：打码串不允许当真 Key 提交 */
+function looksMasked(k) {
+  if (!k) return false
+  const v = String(k).trim()
+  if (!v) return false
+  return v.includes('****') || /^\*+$/.test(v)
+}
 
 // ====================== 初始化加载 ======================
 async function loadAll() {
@@ -245,9 +279,13 @@ function applyPresetTo(key, code, silent = false) {
 
 // ====================== 通用保存/激活/删除（前 4 个 Tab）======================
 async function saveGeneric() {
-  const key = tab.value, type = currentType.value, s = currentGeneric.value
+  const type = currentType.value, s = currentGeneric.value
   try {
     s.saving = true; s.saved = false
+    // 格式校验：原先该输入框完全不校验，用户可存入任意脏串（后端 sanitize 后仍可能是非法 URL）
+    if (s.form.baseUrl && !isValidBaseUrl(s.form.baseUrl)) {
+      throw new Error('API Base URL 格式不正确：必须以 http:// 或 https:// 开头且不含空格，例如 https://api.openai.com/v1')
+    }
     const name = (s.form.name || '').trim() || `未命名-${activeTab.value.label}`
     const payload = {
       profileType: type,
@@ -268,7 +306,9 @@ async function saveGeneric() {
       created = await createApiProfile(payload)
     }
     s.form.name = created.name
-    if (!s.form.apiKey) s.form.apiKey = created.apiKeyMasked || ''
+    // 保存成功后清空输入框：绝不要把打码值(abcd****wxyz)回填到表单，
+    // 否则下一次点「保存」会把打码串当真 Key 提交，真实 Key 被覆盖后所有调用都 401
+    s.form.apiKey = ''
     s.profiles = await listApiProfiles(type)
     const reloaded = s.profiles.find(q => q.id === created.id)
     if (reloaded) s.editingId = reloaded.id
@@ -282,7 +322,7 @@ async function saveGeneric() {
 }
 
 async function activateGeneric(id) {
-  const key = tab.value, type = currentType.value, s = currentGeneric.value
+  const type = currentType.value, s = currentGeneric.value
   try {
     await activateApiProfile(id)
     s.profiles = await listApiProfiles(type)
@@ -315,11 +355,16 @@ function editGenericProfile(p) {
 async function saveWeather() {
   try {
     weather.saving = true; weather.saved = false
+    // 格式校验 + 归一化：先去掉 https:// 前缀与尾部斜杠，再校验主机名；保存时提交归一化后的值（后端会自行补 https://）
+    const apiHost = normalizeApiHost(weather.form.apiHost)
+    if (apiHost && !isValidApiHost(apiHost)) {
+      throw new Error('天气 API Host 格式不正确：只填主机名，可带 https:// 前缀，不要带路径，例如 abc123xyz.def.qweatherapi.com')
+    }
     const payload = {
       profileType: 'WEATHER',
       name: (weather.form.name || '').trim() || '未命名天气',
       provider: weather.form.provider || 'qweather',
-      baseUrl: weather.form.apiHost || '',
+      baseUrl: apiHost,
       model: null,
       apiKey: weather.form.apiKey || '',
       location: weather.form.location || '北京',
@@ -335,7 +380,9 @@ async function saveWeather() {
       created = await createApiProfile(payload)
     }
     weather.form.name = created.name
-    if (!weather.form.apiKey) weather.form.apiKey = created.apiKeyMasked || ''
+    // 同 saveGeneric：打码值一律不回填，避免二次保存把打码串写进库
+    weather.form.apiKey = ''
+    weather.form.apiHost = apiHost   // 表单回显归一化后的值，与库中一致
     weather.profiles = await listApiProfiles('WEATHER')
     const reloaded = weather.profiles.find(q => q.id === created.id)
     if (reloaded) weather.editingId = reloaded.id
@@ -489,6 +536,12 @@ onMounted(loadAll)
         <div class="config-item">
           <label class="lbl">API Key <span class="required">*</span></label>
           <input v-model="currentGeneric.form.apiKey" placeholder="粘贴 Key，编辑时留空表示不换 Key" @input="currentGeneric.saved = false" />
+          <p class="hint" v-if="!currentGeneric.form.apiKey && editingMaskedKey">
+            当前已保存：<code>{{ editingMaskedKey }}</code>（留空 = 不修改；要换 Key 就直接粘贴新的完整 Key）
+          </p>
+          <p class="hint warn" v-if="looksMasked(currentGeneric.form.apiKey)">
+            ⚠️ 这看起来是<strong>打码后的 Key</strong>（形如 abcd****wxyz），不能作为 Key 保存。要换 Key 请粘贴完整的新 Key，否则请清空此输入框。
+          </p>
           <p class="hint">Key 仅保存在本地 MySQL；设置页 list/详情接口返回的永远是打码版；删除 = 物理行清空不留残片</p>
         </div>
         <div class="config-item">
@@ -599,7 +652,7 @@ onMounted(loadAll)
         </div>
         <div class="config-item">
           <label class="lbl">API Host <span class="required">*</span></label>
-          <input v-model="weather.form.apiHost" placeholder="例如：abc123xyz.def.qweatherapi.com（不带 https:// 和路径）" @input="weather.saved = false" />
+          <input v-model="weather.form.apiHost" placeholder="例如：abc123xyz.def.qweatherapi.com（可带 https:// 前缀，不要带路径）" @input="weather.saved = false" />
           <p class="hint">
             <strong>和风自 2026 年起停用了旧公共域名（geoapi/devapi/api.qweather.com，全部返回 404）</strong>。
             请在 <code>console.qweather.com → 设置 → API Host</code> 页面复制你的<strong>个人专属 Host</strong>（形如
@@ -609,6 +662,12 @@ onMounted(loadAll)
         <div class="config-item">
           <label class="lbl">API Key <span class="required">*</span></label>
           <input v-model="weather.form.apiKey" placeholder="访问 console.qweather.com 控制台创建凭据后粘贴" @input="weather.saved = false" />
+          <p class="hint" v-if="!weather.form.apiKey && weatherEditingMaskedKey">
+            当前已保存：<code>{{ weatherEditingMaskedKey }}</code>（留空 = 不修改；要换 Key 就直接粘贴新的完整 Key）
+          </p>
+          <p class="hint warn" v-if="looksMasked(weather.form.apiKey)">
+            ⚠️ 这看起来是<strong>打码后的 Key</strong>（形如 abcd****wxyz），不能作为 Key 保存。要换 Key 请粘贴完整的新 Key，否则请清空此输入框。
+          </p>
           <p class="hint">
             创建凭据时「身份认证方式」选择 <strong>API 密钥</strong>，「选择启用的 API」选择
             <strong>指定 API</strong>，按下方清单勾选 3 个即可。
@@ -652,7 +711,7 @@ onMounted(loadAll)
 
       <div class="save-area">
         <button class="save-btn" @click="saveWeather" :disabled="weather.saving">
-          {{ weatherSaving ? '保存中…' : '保存天气配置并启用' }}
+          {{ weather.saving ? '保存中…' : '保存天气配置并启用' }}
         </button>
         <div v-if="weather.saved" class="save-success">配置已保存，下次刷新即生效</div>
       </div>

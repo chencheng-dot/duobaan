@@ -48,3 +48,7 @@ data/
 
 ### TRAE IDE 临时文件 ###
 .trae/
+
+### 本地私有配置（含口令，绝不入库）###
+application-local.properties
+src/main/resources/application-local.properties

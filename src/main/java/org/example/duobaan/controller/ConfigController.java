@@ -30,6 +30,9 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/config")
 public class ConfigController {
 
+    /** 旧 /config/llm 接口保存的自动配置名 */
+    private static final String AUTO_LLM_NAME = "系统自动保存-LLM";
+
     private final ConfigService configService;   // 保留：/providers 仍在此
     private final ApiProfileService apiProfileService;
     private final DuobaanProperties props;
@@ -129,14 +132,22 @@ public class ConfigController {
     }
 
     @PostMapping("/llm")
+    @Deprecated
     public LlmConfigDTO saveLlmConfig(@RequestBody LlmConfigDTO dto) {
-        // 旧保存行为：创建一条新的 profile，名"系统自动保存-LLM"并设为默认
+        // 旧保存行为原先每次都新建 profile，长期使用会在列表里堆积大量同名「系统自动保存-LLM」。
+        // 现改为：已存在同名自动配置则原地更新它，否则才新建。请新前端改用 /api/config/profiles。
         ApiProfileInbound in = new ApiProfileInbound(
-                ApiProfileType.LLM, "系统自动保存-LLM",
+                ApiProfileType.LLM, AUTO_LLM_NAME,
                 dto.provider(), dto.baseUrl(), dto.model(), dto.apiKey(),
                 null, null, dto.timeoutSeconds(), true);
-        ApiProfileDTO created = apiProfileService.create(in);
-        return new LlmConfigDTO(created.provider(), created.baseUrl(), "", created.model(), created.timeoutSeconds());
+        Optional<Long> existingId = apiProfileService.list(ApiProfileType.LLM).stream()
+                .filter(p -> AUTO_LLM_NAME.equals(p.name()))
+                .map(ApiProfileDTO::id)
+                .findFirst();
+        ApiProfileDTO saved = existingId
+                .map(id -> apiProfileService.update(id, in))
+                .orElseGet(() -> apiProfileService.create(in));
+        return new LlmConfigDTO(saved.provider(), saved.baseUrl(), "", saved.model(), saved.timeoutSeconds());
     }
 
     @GetMapping("/weather")
@@ -153,7 +164,15 @@ public class ConfigController {
                     p.getLocation() == null ? "" : p.getLocation(),
                     p.getCacheTtlSeconds() == null ? 600L : p.getCacheTtlSeconds());
         }
-        return configService.getWeatherConfig();
+        // 回退分支（无 active WEATHER 配置）走遗留 system_config / properties，其 apiKey 是明文。
+        // 必须和上面分支一样打码后再对外，否则 GET /api/config/weather 会直接回吐天气 API Key。
+        WeatherConfigDTO legacy = configService.getWeatherConfig();
+        return new WeatherConfigDTO(
+                legacy.provider(),
+                legacy.apiHost(),
+                ApiProfileService.maskKey(legacy.apiKey()),
+                legacy.location(),
+                legacy.cacheTtlSeconds());
     }
 
     @PostMapping("/weather")

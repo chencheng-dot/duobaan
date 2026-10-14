@@ -7,13 +7,19 @@ import java.util.List;
  *  - 文生图：每个 item.url 是图片直链（或 b64Data base64 编码 png/jpeg）
  *  - 文生视频：每个 item.url 是 mp4 直链；status = pending / succeeded / failed
  *  - 语音转写：text 字段非空时直接读，items 为空
+ *
+ * 注意：本 record 返回给前端时由 Jackson 序列化为 JSON，
+ * 因此 TTS 的 audioBytes 一定会被 base64 编码后随 JSON 传输（体积 +33%），
+ * 「响应体直接流式回传、不经过 JSON」的说法并不成立。
+ * 若要做真正的二进制流式下载，需要把对应 Controller 改成返回 ResponseEntity&lt;byte[]&gt;。
+ * 另外 MediaController 写库时已剔除 audioBytes 与超大 b64Data，避免 chat_message 膨胀。
  */
 public record MediaResponse(
         String kind,          // IMAGE / AUDIO_TTS / AUDIO_ASR / VIDEO / ERROR
         String status,        // succeeded / failed / pending / degraded
         String error,         // 失败时的用户友好错误（非技术堆栈）
         String text,          // 仅 ASR 转写返回文本
-        byte[] audioBytes,    // 仅 TTS 返回二进制（响应体直接流式回传前端不经过 JSON）
+        byte[] audioBytes,    // 仅 TTS 返回二进制；经 Jackson 序列化后会变成 base64 字符串（+33% 体积）
         String audioMime,     // TTS 的 Content-Type，例 audio/mpeg
         String audioFilename, // TTS 建议保存名，例 speech.mp3
         String message,       // 可选的人读提示（万相异步 task_id 说明、操作指引等）

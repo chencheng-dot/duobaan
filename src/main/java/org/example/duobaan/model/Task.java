@@ -63,7 +63,7 @@ public class Task {
     private LocalDateTime submittedAt;
 
     /** 软删除标记：0=正常，1=已删除。默认 0，实体查询自动过滤 deleted=1 */
-    @Column(columnDefinition = "TINYINT(1) DEFAULT 0")
+    @Column(nullable = false, columnDefinition = "TINYINT(1) DEFAULT 0")
     private Boolean deleted = false;
 
     /** 软删除时间：deleted=1 时写入，用于"已删除"列表按删除时间倒序 */

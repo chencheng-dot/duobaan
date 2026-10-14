@@ -13,6 +13,8 @@ import org.example.duobaan.repository.SystemConfigRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -28,6 +30,8 @@ public class ConfigService {
     private final SystemConfigRepository repo;
     private final DuobaanProperties props;
     private final ObjectMapper objectMapper;
+
+    private static final Logger log = LoggerFactory.getLogger(ConfigService.class);
 
     public ConfigService(SystemConfigRepository repo, DuobaanProperties props, ObjectMapper objectMapper) {
         this.repo = repo;
@@ -45,6 +49,7 @@ public class ConfigService {
                 return objectMapper.readValue(saved.get().getValue(), LlmConfigDTO.class);
             } catch (Exception e) {
                 // JSON 损坏则回退到默认
+                log.warn("llm.config JSON 损坏，回退默认配置：{}", e.getMessage());
             }
         }
         // 回退到 application.properties
@@ -155,7 +160,8 @@ public class ConfigService {
                 long ttl = dto.cacheTtlSeconds() <= 0 ? w.getCacheTtlSeconds() : dto.cacheTtlSeconds();
                 return new org.example.duobaan.model.dto.WeatherConfigDTO(
                         provider, apiHost, apiKey, location, ttl);
-            } catch (Exception ignore) {
+            } catch (Exception e) {
+                log.warn("weather.config JSON 损坏，回退默认配置：{}", e.getMessage());
             }
         }
         return new org.example.duobaan.model.dto.WeatherConfigDTO(

@@ -5,10 +5,14 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.params.ScanParams;
+import redis.clients.jedis.resps.ScanResult;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -23,6 +27,8 @@ import tools.jackson.databind.ObjectMapper;
  */
 @Service
 public class RedisVectorService {
+
+    private static final Logger log = LoggerFactory.getLogger(RedisVectorService.class);
 
     private final JedisPool jedisPool;
     private final ObjectMapper objectMapper;
@@ -81,7 +87,9 @@ public class RedisVectorService {
             for (String m : members) {
                 try {
                     ids.add(Long.parseLong(m));
-                } catch (NumberFormatException ignore) {
+                } catch (NumberFormatException e) {
+                    // 脏 member（非数字 chunkId）只跳过自己，但必须留痕，避免"静默少数据"
+                    log.warn("知识库 {} 的 chunks 集合存在非法成员「{}」，已跳过", kbId, m);
                 }
             }
             return ids;
@@ -100,7 +108,8 @@ public class RedisVectorService {
             if (kbId != null) {
                 jedis.srem(chunksKey(kbId), String.valueOf(chunkId));
             }
-        } catch (Exception ignore) {
+        } catch (Exception e) {
+            log.warn("删除分块 {} 的 Redis 向量失败：{}", chunkId, e.getMessage());
         }
     }
 
@@ -112,11 +121,23 @@ public class RedisVectorService {
         try (Jedis jedis = jedisPool.getResource()) {
             Set<String> members = jedis.smembers(chunksKey(kbId));
             if (members != null && !members.isEmpty()) {
-                String[] keys = members.stream().map(m -> vecKey(Long.parseLong(m))).toArray(String[]::new);
-                jedis.del(keys);
+                List<String> keys = new ArrayList<>();
+                for (String m : members) {
+                    try {
+                        keys.add(vecKey(Long.parseLong(m)));
+                    } catch (NumberFormatException e) {
+                        // 脏 member 逐条跳过并留痕：不能让它中断整库删除，也不能静默
+                        log.warn("知识库 {} 的 chunks 集合存在非法成员「{}」，已跳过该向量删除", kbId, m, e);
+                    }
+                }
+                if (!keys.isEmpty()) {
+                    jedis.del(keys.toArray(new String[0]));
+                }
             }
             jedis.del(chunksKey(kbId));
-        } catch (Exception ignore) {
+        } catch (Exception e) {
+            // 清理失败不能吞掉：留痕便于发现 Redis 异常导致的残留向量
+            log.warn("清理知识库 {} 的 Redis 向量失败：{}", kbId, e.toString(), e);
         }
     }
 
@@ -157,20 +178,25 @@ public class RedisVectorService {
         }
     }
 
-    /** 取当前 Redis 中所有知识库的 chunkId 集合（用于跨库检索时枚举） */
+    /** 取当前 Redis 中所有知识库的 kbId 集合（用于跨库检索时枚举）；用 SCAN 替代 KEYS，避免阻塞 */
     public Set<Long> getAllKbIds() {
         Set<Long> ids = new HashSet<>();
         try (Jedis jedis = jedisPool.getResource()) {
-            Set<String> keys = jedis.keys("kb:chunks:*");
-            if (keys != null) {
-                for (String k : keys) {
+            String cursor = ScanParams.SCAN_POINTER_START;
+            ScanParams params = new ScanParams().match("kb:chunks:*").count(200);
+            do {
+                ScanResult<String> rs = jedis.scan(cursor, params);
+                for (String k : rs.getResult()) {
                     try {
                         ids.add(Long.parseLong(k.substring("kb:chunks:".length())));
-                    } catch (NumberFormatException ignore) {
+                    } catch (NumberFormatException e) {
+                        log.warn("SCAN 到非法知识库 key「{}」，已跳过", k);
                     }
                 }
-            }
-        } catch (Exception ignore) {
+                cursor = rs.getCursor();
+            } while (!ScanParams.SCAN_POINTER_START.equals(cursor));
+        } catch (Exception e) {
+            log.warn("SCAN 枚举知识库 kbId 失败：{}", e.getMessage());
         }
         return ids;
     }

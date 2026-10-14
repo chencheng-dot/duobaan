@@ -17,6 +17,8 @@ import org.example.duobaan.model.dto.TaskRequest;
 import org.example.duobaan.model.dto.TaskSummary;
 import org.example.duobaan.repository.TaskHistoryRepository;
 import org.example.duobaan.repository.TaskRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -33,38 +35,39 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 public class TaskService {
 
+    private static final Logger log = LoggerFactory.getLogger(TaskService.class);
+
     private static final int HISTORY_LIMIT = 500;
+
+    /** 标题长度上限，与 task.title VARCHAR(200) 及 TaskRequest 上的 @Size 保持一致 */
+    private static final int TITLE_MAX_LENGTH = 200;
 
     private final TaskRepository repo;
     private final TaskHistoryRepository historyRepo;
+    private final TaskRolloverService rolloverService;
 
-    public TaskService(TaskRepository repo, TaskHistoryRepository historyRepo) {
+    public TaskService(TaskRepository repo, TaskHistoryRepository historyRepo,
+            TaskRolloverService rolloverService) {
         this.repo = repo;
         this.historyRepo = historyRepo;
+        this.rolloverService = rolloverService;
     }
 
-    /** 上一次执行 rollover 的日期，避免同一次启动内反复触发 */
+    /** 上一次<b>成功</b>执行 rollover 的日期；失败时保持旧值，允许后续查询重试 */
     private volatile LocalDate lastRolloverDate;
 
     /**
      * 零点转组：把「明日」分组的任务全部转到「今日」。
      * 每天凌晨 0:05 执行（延迟 5 秒避免整点竞争）。
+     *
+     * 这里刻意<b>不加 @Transactional</b>：真正的转组在 TaskRolloverService.doRollover() 里，
+     * 它自己开事务。如果本方法再包一层事务，提交会推迟到本方法返回之后 ——
+     * 那就可能在事务尚未提交时就乐观地推进 lastRolloverDate。
+     * 在外层无事务时，doRollover() 的事务是最外层，返回即代表已提交，可以安全置位。
      */
     @Scheduled(cron = "0 5 0 * * *")
-    @Transactional
     public void rolloverTomorrowToToday() {
-        LocalDate today = LocalDate.now();
-        if (today.equals(lastRolloverDate)) return;
-        lastRolloverDate = today;
-        List<Task> tomorrowTasks = repo.findByGroupOrderByCreatedAtAsc(TaskGroup.TOMORROW);
-        int count = 0;
-        for (Task t : tomorrowTasks) {
-            t.setGroup(TaskGroup.TODAY);
-            count++;
-        }
-        if (count > 0) {
-            repo.saveAll(tomorrowTasks);
-        }
+        runRollover("定时任务");
     }
 
     /**
@@ -72,25 +75,42 @@ public class TaskService {
      * 仅当日历日变化时触发。
      */
     private void ensureRollover() {
+        runRollover("懒加载查询");
+    }
+
+    /**
+     * 转组的唯一入口：定时与懒加载共用同一段逻辑（对外仍是「定时 + 懒加载双保险」）。
+     *
+     * 关键点：<b>先干活，成功后置位</b>。旧的写法是先把 lastRolloverDate 置为今天再 saveAll，
+     * 一旦 saveAll 抛异常，当天就再也不会重试（因为日期看起来已经「转过了」）。
+     * 现在只有 doRollover() 正常返回（事务已提交）才推进日期；失败则只 warn，日期保持旧值，
+     * 下一次 list() / contextSummary() 会自然重试，无需人工干预。
+     *
+     * 多实例：lastRolloverDate 是进程内内存态，多个实例会各自触发一次；
+     * 但 doRollover() 是单条带 WHERE 条件的原子 UPDATE，第二个实例只会匹配 0 行，结果幂等。
+     */
+    private void runRollover(String trigger) {
         LocalDate today = LocalDate.now();
-        if (!today.equals(lastRolloverDate)) {
+        if (today.equals(lastRolloverDate)) {
+            return;
+        }
+        try {
+            int moved = rolloverService.doRollover();
             lastRolloverDate = today;
-            List<Task> tomorrowTasks = repo.findByGroupOrderByCreatedAtAsc(TaskGroup.TOMORROW);
-            if (!tomorrowTasks.isEmpty()) {
-                for (Task t : tomorrowTasks) {
-                    t.setGroup(TaskGroup.TODAY);
-                }
-                repo.saveAll(tomorrowTasks);
+            if (moved > 0) {
+                log.info("[TaskRollover] {} 触发：{} 条「明日」任务已转为「今日」", trigger, moved);
             }
+        } catch (Exception e) {
+            // 不推进 lastRolloverDate，允许下次查询重试
+            log.warn("[TaskRollover] {} 触发转组失败，保留重试机会（{}）：{}",
+                    trigger, today, e.getMessage());
         }
     }
 
     public List<Task> list(TaskGroup group) {
         ensureRollover();
         // 流程表只显示待办/进行中；已完成(DONE)和已上交(SUBMITTED)的任务只在「我的」页可见
-        return repo.findByGroupOrderByCreatedAtAsc(group).stream()
-                .filter(t -> t.getStatus() != TaskStatus.DONE && t.getStatus() != TaskStatus.SUBMITTED)
-                .toList();
+        return repo.findActiveByGroup(group);
     }
 
     @Transactional
@@ -117,8 +137,19 @@ public class TaskService {
     public List<Task> bulkCreate(List<org.example.duobaan.model.dto.BulkTaskRequest.Item> items) {
         List<Task> created = new ArrayList<>();
         for (org.example.duobaan.model.dto.BulkTaskRequest.Item item : items) {
+            // BulkTaskRequest.Item 是嵌套 record、不在本次允许改动的文件清单内，
+            // 无法在它上面加 @NotBlank/@Size 让 @Valid 级联生效，所以在服务层显式兜底校验，
+            // 避免空标题 / 超长标题直接落到 DB 抛 DataIntegrityViolationException（500）。
+            String title = item.title();
+            if (title == null || title.isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "任务标题不能为空");
+            }
+            if (title.length() > TITLE_MAX_LENGTH) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "任务标题不能超过 " + TITLE_MAX_LENGTH + " 字");
+            }
             TaskCategory category = item.category() != null ? item.category() : TaskCategory.WORK;
-            Task t = new Task(item.title(), category, normalizeGroup(item.group()));
+            Task t = new Task(title, category, normalizeGroup(item.group()));
             t.setSource(TaskSource.LLM);
             created.add(repo.save(t));
         }
@@ -188,12 +219,13 @@ public class TaskService {
         repo.deleteById(id);
     }
 
-    /** 硬删除：物理删除行，不可恢复。供「我的 → 已删除」中的彻底删除使用。 */
+    /** 硬删除：物理删除行，不可恢复。仅允许删除已软删除(deleted=1)的行。 */
     @Transactional
     public void hardDelete(Long id) {
         int rows = repo.hardDelete(id);
         if (rows == 0) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在: " + id);
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "只能彻底删除「已删除」列表中的任务（id=" + id + "）");
         }
     }
 

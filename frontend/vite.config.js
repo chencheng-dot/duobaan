@@ -16,7 +16,10 @@ export default defineConfig({
   },
   build: {
     outDir: '../src/main/resources/static',
-    emptyOutDir: false,
+    // 必须显式开启：outDir 在 Vite root 之外，默认不会清空，导致每次构建都把旧的
+    // index-<hash>.js/css 留在 static/assets 里永久堆积（实测已积累 58 个文件、约 10MB）。
+    // 该目录里只有前端构建产物（index.html + assets/），清空是安全的，且二者都在 .gitignore 中。
+    emptyOutDir: true,
     assetsDir: 'assets'
   }
 })

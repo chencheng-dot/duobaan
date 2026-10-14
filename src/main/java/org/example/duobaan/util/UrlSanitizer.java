@@ -101,9 +101,12 @@ public final class UrlSanitizer {
         //    最多循环 3 次：因为偶尔有「/compatible-mode/v1/videos/generations」这种嵌套后缀
         for (int i = 0; i < 3; i++) {
             java.util.regex.Matcher m = ACTION_SUFFIX.matcher(s);
-            // 只匹配末尾段；注意 lastIndexOf 可能返回 -1（如天气 Host 无 /），find 起点 ≥ 0
-            int startFrom = Math.max(0, s.lastIndexOf('/'));
-            if (m.find(startFrom) && m.end() == s.length()) {
+            // 必须从头找：正则自带 $ 锚点已经保证「只匹配结尾」，用 m.end() == s.length() 兜底。
+            // 之前的 Math.max(0, s.lastIndexOf('/')) 会让所有含 "/" 的分支（chat/completions、
+            // videos/generations、audio/speech、services/aigc/**）永远匹配不上，
+            // 而 ".../v1/chat/completions" 会退化命中单段分支 "completions"，
+            // 被错误裁成 ".../v1/chat"（之后所有请求都会打到 /v1/chat/chat/completions → 404）。
+            if (m.find() && m.end() == s.length()) {
                 s = s.substring(0, m.start());
             } else {
                 break;
@@ -137,9 +140,8 @@ public final class UrlSanitizer {
         return Math.min(a, b);
     }
 
-    /** 通用 trimToNull：null → null */
+    /** 通用 trimToNull：null / 空白 → null */
     public static String cleanText(String s) {
-        if (!StringUtils.hasText(s)) return s == null ? null : null;
-        return s.trim();
+        return StringUtils.hasText(s) ? s.trim() : null;
     }
 }

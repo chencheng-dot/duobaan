@@ -22,6 +22,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import org.example.duobaan.util.UrlSanitizer;
+import org.springframework.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import tools.jackson.databind.ObjectMapper;
 
 @Service
@@ -34,6 +37,8 @@ public class ApiProfileService {
     private final SystemConfigRepository systemConfigRepo;
     private final DuobaanProperties props;
     private final ObjectMapper objectMapper;
+
+    private static final Logger log = LoggerFactory.getLogger(ApiProfileService.class);
 
     public ApiProfileService(ApiProfileRepository repo, SystemConfigRepository systemConfigRepo,
                              DuobaanProperties props, ObjectMapper objectMapper) {
@@ -123,8 +128,9 @@ public class ApiProfileService {
         try {
             migrateOne(ApiProfileType.LLM, CFG_LLM);
             migrateOne(ApiProfileType.WEATHER, CFG_WEATHER);
-        } catch (Exception ignore) {
+        } catch (Exception e) {
             // 迁移失败只打印日志，不阻断启动；旧 system_config 仍在，用户可手动重填
+            log.warn("旧配置迁移失败（不阻断启动）：{}", e.getMessage(), e);
         }
     }
 
@@ -165,8 +171,9 @@ public class ApiProfileService {
             if (created != null) {
                 systemConfigRepo.deleteById(cfgKey);
             }
-        } catch (Exception ignore) {
+        } catch (Exception e) {
             // 反序列化失败，老数据跳过
+            log.warn("迁移旧配置时反序列化失败，已跳过：{}", e.getMessage());
         }
     }
 
@@ -195,6 +202,15 @@ public class ApiProfileService {
             if (in.apiKey() == null || in.apiKey().isBlank()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请填写 API Key");
             }
+            if (isMaskedKey(in.apiKey())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "检测到打码后的 Key（形如 abcd****wxyz），请粘贴真实 API Key");
+            }
+        }
+        if (in.timeoutSeconds() != null && (in.timeoutSeconds() < 1 || in.timeoutSeconds() > 600)) {
+            // 第 4 批配套：改走 ResponseStatusException → handleStatus，才能保留这句面向用户的校验提示
+            //（GlobalExceptionHandler 已把 IllegalArgumentException 统一收敛成固定文案）。
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "超时时间需在 1~600 秒之间");
         }
     }
 
@@ -205,9 +221,14 @@ public class ApiProfileService {
         target.setBaseUrl(UrlSanitizer.sanitizeBaseUrl(in.baseUrl()));
         target.setModel(trim(in.model()));
         if (creating) {
-            target.setApiKey(in.apiKey());
+            target.setApiKey(trim(in.apiKey()));
         } else {
-            if (in.apiKey() != null && !in.apiKey().isBlank()) target.setApiKey(in.apiKey());
+            // 编辑模式：留空 = 不换 Key；打码串（abcd****wxyz）同样视为「不修改」。
+            // 前端列表/详情返回的永远是打码值，一旦被回填提交当真 Key 写库，
+            // 真实 Key 就被覆盖，之后所有大模型/图片/语音/天气调用全部 401 且界面看不出原因。
+            if (StringUtils.hasText(in.apiKey()) && !isMaskedKey(in.apiKey())) {
+                target.setApiKey(trim(in.apiKey()));
+            }
         }
         target.setLocation(trim(in.location()));
         target.setCacheTtlSeconds(in.cacheTtlSeconds());
@@ -241,6 +262,31 @@ public class ApiProfileService {
         int len = apiKey.length();
         if (len < 8) return "****";
         return apiKey.substring(0, 4) + "****" + apiKey.substring(len - 4);
+    }
+
+    /**
+     * 判断入参是不是「打码后的 Key」——即 maskKey() 产出的 前4 + **** + 后4（或整串 *）。
+     * 打码值绝不能写库：写进去等于把真 Key 覆盖成一个假的字符串，
+     * 之后所有大模型 / 图片 / 语音 / 天气调用都会 401，而界面上只显示「调用失败」。
+     * 真实 API Key 不会包含 "****"，因此这个判定不会误伤。
+     */
+    static boolean isMaskedKey(String apiKey) {
+        if (apiKey == null) {
+            return false;
+        }
+        String k = apiKey.trim();
+        if (k.isEmpty()) {
+            return false;
+        }
+        if (k.contains("****")) {
+            return true;
+        }
+        for (int i = 0; i < k.length(); i++) {
+            if (k.charAt(i) != '*') {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static ApiProfileDTO toMaskedDTO(ApiProfile p) {

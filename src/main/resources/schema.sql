@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS `task` (
     `deleted_at`        DATETIME(6)   NULL COMMENT '软删除时间',
     PRIMARY KEY (`id`),
     KEY `idx_task_status_deleted` (`task_status`, `deleted`),
+    KEY `idx_task_group_deleted_created` (`task_group`, `deleted`, `created_at`),
     KEY `idx_task_deleted_at` (`deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

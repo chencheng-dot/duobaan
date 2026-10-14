@@ -1,5 +1,5 @@
-﻿<script setup>
-import { ref, nextTick, onMounted } from 'vue'
+<script setup>
+import { ref, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import {
   chatStream,
   parseTasks,
@@ -48,6 +48,13 @@ const loading = ref(false)
 const listEl = ref(null)
 const fileInputRef = ref(null)
 let abortFn = null
+// 流式序号：切换 props.mode（或再次发送）后旧流的 onDelta/onDone/onError 会被丢弃，
+// 避免旧流增量写进新会话（同 TopBar.vue 里 weatherSeq 的写法）。
+let streamSeq = 0
+
+// 稳定消息 id：历史里没有 id，用本地自增序号补一个，给 v-for :key 用
+let msgSeq = 0
+function nextMsgId() { return `m${++msgSeq}` }
 
 // 拆单结果（待确认/已确认）
 const parsedTasks = ref([])
@@ -80,6 +87,7 @@ onMounted(async () => {
       messages.value = list.map((m) => {
         const { text, rich } = parseContent(m.content ?? '')
         return {
+          id: nextMsgId(),
           role: m.role || 'assistant',
           content: text,
           rich,
@@ -104,6 +112,49 @@ onMounted(async () => {
   }
 })
 
+// ================= Blob URL 生命周期 =================
+// 每条 TTS 音频只在「生成完成时」算一次 ObjectURL 并缓存在气泡上，
+// 模板直接读 m.audioUrl（不再每次渲染都调用 audioSrc() 造新 URL）；
+// 组件卸载时统一 revoke，避免内存泄漏（全项目其它地方均无 revokeObjectURL）。
+const blobUrls = new Set()
+
+// 异步任务轮询表：bubble -> timer。声明提前，供 onBeforeUnmount 清理使用。
+const activePollers = new Map()
+
+function makeAudioUrl(payload) {
+  if (!payload || !payload.audioBytes) return ''
+  try {
+    const bytes = Uint8Array.from(atob(payload.audioBytes), (c) => c.charCodeAt(0))
+    const blob = new Blob([bytes], { type: payload.audioMime || 'audio/mpeg' })
+    const url = URL.createObjectURL(blob)
+    blobUrls.add(url)
+    return url
+  } catch (_) {
+    return ''
+  }
+}
+
+/** 替换/清空某气泡的音频时，先释放旧 URL */
+function setAudioUrl(bubble, url) {
+  if (bubble.audioUrl && bubble.audioUrl !== url) {
+    URL.revokeObjectURL(bubble.audioUrl)
+    blobUrls.delete(bubble.audioUrl)
+  }
+  bubble.audioUrl = url || ''
+}
+
+onBeforeUnmount(() => {
+  // 1) 中止进行中的流
+  streamSeq++
+  if (abortFn) { try { abortFn() } catch (_) { /* 忽略 */ } abortFn = null }
+  // 2) 清掉所有异步任务轮询定时器
+  for (const timer of activePollers.values()) clearInterval(timer)
+  activePollers.clear()
+  // 3) 释放所有缓存过的 Blob URL
+  for (const url of blobUrls) URL.revokeObjectURL(url)
+  blobUrls.clear()
+})
+
 // ================= 统一发送入口 =================
 function sendText() {
   const text = input.value.trim()
@@ -125,24 +176,28 @@ function sendText() {
 
 /** 普通文本模型流式对话（也是「智能」Tab 的默认行为） */
 async function sendTextLLM(text) {
-  messages.value.push({ role: 'user', content: text })
+  messages.value.push({ id: nextMsgId(), role: 'user', content: text })
   input.value = ''
   loading.value = true
-  const bubble = { role: 'assistant', content: '', streaming: true }
+  const bubble = { id: nextMsgId(), role: 'assistant', content: '', streaming: true }
   messages.value.push(bubble)
   await scrollToBottom()
 
+  const seq = ++streamSeq
   abortFn = chatStream(text, props.mode, {
     onDelta: (delta) => {
+      if (seq !== streamSeq) return
       bubble.content += delta
       scrollToBottom()
     },
     onDone: () => {
+      if (seq !== streamSeq) return
       bubble.streaming = false
       loading.value = false
       abortFn = null
     },
     onError: (msg) => {
+      if (seq !== streamSeq) return
       bubble.content += `\n[流式错误: ${msg}]`
       bubble.streaming = false
       bubble.degraded = true
@@ -153,7 +208,9 @@ async function sendTextLLM(text) {
 }
 
 function stop() {
-  if (abortFn) abortFn()
+  streamSeq++            // 作废当前流序号：abort 触发的 onDone 不会再改写状态
+  if (abortFn) { try { abortFn() } catch (_) { /* 忽略 */ } }
+  abortFn = null
   loading.value = false
   const last = messages.value[messages.value.length - 1]
   if (last && last.streaming) {
@@ -165,9 +222,9 @@ function stop() {
 // ================= IMAGE 文生图 =================
 async function doImage(prompt) {
   loading.value = true
-  messages.value.push({ role: 'user', content: '【文生图】' + prompt })
+  messages.value.push({ id: nextMsgId(), role: 'user', content: '【文生图】' + prompt })
   input.value = ''
-  const bubble = { role: 'assistant', content: '🎨 生图中，请稍候…', loading: true }
+  const bubble = { id: nextMsgId(), role: 'assistant', content: '🎨 生图中，请稍候…', loading: true }
   messages.value.push(bubble)
   await scrollToBottom()
   try {
@@ -206,8 +263,6 @@ function extractTaskId(message) {
 }
 
 // 自动轮询异步任务状态
-const activePollers = new Map() // bubble -> timer
-
 function startPolling(bubble, taskId, profileId, kind) {
   if (activePollers.has(bubble)) return
   let count = 0
@@ -221,10 +276,8 @@ function startPolling(bubble, taskId, profileId, kind) {
         activePollers.delete(bubble)
         bubble.content = '🎨 生成完成（点击图片可新标签页打开）'
         bubble.rich = { kind, payload: res, text: bubble.content }
-        // 轮询成功后把新结果同步到后端数据库，确保刷新后不丢失
-        try {
-          await fetch(`/api/llm/history?mode=${props.mode}`, { method: 'GET' })
-        } catch (_) {}
+        // 结果只在本地 state 里生效；不在这里发 GET /api/llm/history
+        // （GET 没有写入能力，既不能"同步到后端数据库"，也只会白白多一次请求）。
         scrollToBottom()
       } else if (res.status === 'degraded' || res.error) {
         clearInterval(timer)
@@ -252,9 +305,9 @@ function startPolling(bubble, taskId, profileId, kind) {
 // ================= TTS 文生语音 =================
 async function doTTS(text) {
   loading.value = true
-  messages.value.push({ role: 'user', content: '【朗读】' + text })
+  messages.value.push({ id: nextMsgId(), role: 'user', content: '【朗读】' + text })
   input.value = ''
-  const bubble = { role: 'assistant', content: '🔊 合成语音中…', loading: true }
+  const bubble = { id: nextMsgId(), role: 'assistant', content: '🔊 合成语音中…', loading: true }
   messages.value.push(bubble)
   await scrollToBottom()
   try {
@@ -263,6 +316,7 @@ async function doTTS(text) {
     if (res.status === 'succeeded') {
       bubble.content = '🔊 朗读完成（点击音频播放）'
       bubble.rich = { kind: 'AUDIO_TTS', payload: res, text: bubble.content }
+      setAudioUrl(bubble, makeAudioUrl(res))   // 只在这里算一次 ObjectURL 并缓存
     } else {
       bubble.content = res.error || '合成失败'
       bubble.degraded = true
@@ -292,8 +346,8 @@ async function runASR() {
   const theFile = asrFile.value
   const theName = asrFileName.value
   loading.value = true
-  messages.value.push({ role: 'user', content: '【语音转写】' + theName })
-  const bubble = { role: 'assistant', content: '🎙 转写中…', loading: true }
+  messages.value.push({ id: nextMsgId(), role: 'user', content: '【语音转写】' + theName })
+  const bubble = { id: nextMsgId(), role: 'assistant', content: '🎙 转写中…', loading: true }
   messages.value.push(bubble)
   asrFile.value = null
   asrFileName.value = ''
@@ -321,9 +375,9 @@ async function runASR() {
 // ================= VIDEO 文生视频 =================
 async function doVideo(prompt) {
   loading.value = true
-  messages.value.push({ role: 'user', content: '【文生视频】' + prompt })
+  messages.value.push({ id: nextMsgId(), role: 'user', content: '【文生视频】' + prompt })
   input.value = ''
-  const bubble = { role: 'assistant', content: '🎬 视频生成中（较慢约 1~3 分钟）…', loading: true }
+  const bubble = { id: nextMsgId(), role: 'assistant', content: '🎬 视频生成中（较慢约 1~3 分钟）…', loading: true }
   messages.value.push(bubble)
   await scrollToBottom()
   try {
@@ -360,15 +414,6 @@ function imageSrc(item) {
   if (item && item.b64Data) return `data:image/png;base64,${item.b64Data}`
   return ''
 }
-function audioSrc(payload) {
-  if (!payload) return ''
-  if (payload.audioBytes) {
-    const bytes = Uint8Array.from(atob(payload.audioBytes), (c) => c.charCodeAt(0))
-    const blob = new Blob([bytes], { type: payload.audioMime || 'audio/mpeg' })
-    return URL.createObjectURL(blob)
-  }
-  return ''
-}
 function videoSrc(item) { return item && item.url ? item.url : '' }
 
 // ================= 拆单（保留原 WORK 模式功能） =================
@@ -382,6 +427,7 @@ async function parseCurrent() {
   } catch (e) {
     parsedTasks.value = []
     messages.value.push({
+      id: nextMsgId(),
       role: 'assistant',
       content: '拆单失败：' + e.message,
       degraded: true
@@ -405,12 +451,14 @@ async function saveParsed() {
     parsedTasks.value = []
     emit('tasks-created', created)
     messages.value.push({
+      id: nextMsgId(),
       role: 'assistant',
       content: `已把 ${created.length} 条任务写入流程表。`
     })
     await scrollToBottom()
   } catch (e) {
     messages.value.push({
+      id: nextMsgId(),
       role: 'assistant',
       content: '批量写入失败：' + e.message,
       degraded: true
@@ -473,8 +521,8 @@ function sendDisabled() {
         切到「🖼图片 / 🎬视频 / 🔊朗读 / 🎙转写」Tab 可调用对应模型。
       </div>
       <div
-        v-for="(m, i) in messages"
-        :key="i"
+        v-for="m in messages"
+        :key="m.id"
         class="bubble"
         :class="m.role"
       >
@@ -489,7 +537,7 @@ function sendDisabled() {
           <div v-if="m.rich.payload && m.rich.payload.items && m.rich.payload.items.length" class="rich-grid">
             <a
               v-for="(it, j) in m.rich.payload.items"
-              :key="j"
+              :key="it.url || it.b64Data || ('img-' + m.id + '-' + j)"
               :href="imageSrc(it)"
               target="_blank"
               rel="noreferrer"
@@ -505,7 +553,7 @@ function sendDisabled() {
 
         <!-- 富内容：TTS 音频 -->
         <div v-if="m.rich && m.rich.kind === 'AUDIO_TTS' && m.rich.payload" class="rich-media">
-          <audio v-if="audioSrc(m.rich.payload)" :src="audioSrc(m.rich.payload)" controls preload="metadata"></audio>
+          <audio v-if="m.audioUrl" :src="m.audioUrl" controls preload="metadata"></audio>
           <div v-else class="muted" style="font-size: 12px;">（当前浏览器无法播放该音频）</div>
         </div>
 
@@ -513,7 +561,7 @@ function sendDisabled() {
         <div v-if="m.rich && m.rich.kind === 'VIDEO' && m.rich.payload && m.rich.payload.items" class="rich-media">
           <video
             v-for="(it, j) in m.rich.payload.items"
-            :key="j"
+            :key="it.url || ('video-' + m.id + '-' + j)"
             :src="videoSrc(it)"
             controls
             preload="metadata"
@@ -535,7 +583,9 @@ function sendDisabled() {
         </button>
       </div>
       <div class="parsed-list">
-        <div v-for="(t, i) in parsedTasks" :key="i" class="parsed-item">
+        <!-- 拆单结果由 parseTasks 返回，后端不带稳定 id；用「标题+分组+序号」组合成 key，
+             序号只是防重复标题冲突，不作为主标识。索引 i 仍用于 removeParsed(i)。 -->
+        <div v-for="(t, i) in parsedTasks" :key="`${t.group}-${t.title}-${i}`" class="parsed-item">
           <span class="p-group" :class="t.group">{{ t.group === 'TODAY' ? '今' : '明' }}</span>
           <span class="p-title">{{ t.title }}</span>
           <button class="p-rm" @click="removeParsed(i)" title="移除">✕</button>

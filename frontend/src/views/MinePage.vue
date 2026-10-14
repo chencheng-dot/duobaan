@@ -60,6 +60,12 @@ function taskSortKey(t) {
   return t.createdAt
 }
 
+// 原先在模板内联 [...currentList].sort(...)：每次渲染都会重建数组并排序，排序逻辑也埋在模板里。
+// 收敛为 computed，只在 currentList / tab 变化时重算一次。
+const sortedList = computed(() =>
+  [...currentList.value].sort((a, b) => new Date(taskSortKey(b)) - new Date(taskSortKey(a)))
+)
+
 onMounted(() => {
   load()
   loadKbData()
@@ -139,14 +145,21 @@ function strategyLabel(s) { return STRATEGY_LABELS[s] || s || '按段落' }
 async function createKnowledgeBase() {
   const name = newKbName.value.trim()
   if (!name || kbCreating.value) return
+  const chunkSize = Number(newKbChunkSize.value) || 500
+  const chunkOverlap = Number(newKbChunkOverlap.value) || 50
+  // 约束：重叠必须严格小于分块大小 —— 否则分块会原地打转/产生无效分块（原先前端无任何校验）
+  if (chunkOverlap >= chunkSize) {
+    kbError.value = `分块重叠（${chunkOverlap}）必须小于分块大小（${chunkSize}），请调整后再创建。`
+    return
+  }
   kbCreating.value = true
   try {
     await createKb({
       name,
       description: newKbDesc.value.trim(),
       splitStrategy: newKbStrategy.value,
-      chunkSize: Number(newKbChunkSize.value) || 500,
-      chunkOverlap: Number(newKbChunkOverlap.value) || 50
+      chunkSize,
+      chunkOverlap
     })
     newKbName.value = ''
     newKbDesc.value = ''
@@ -418,7 +431,7 @@ async function doRevectorize(kb) {
 
         <div v-else class="task-list">
           <div
-            v-for="t in [...currentList].sort((a, b) => new Date(taskSortKey(b)) - new Date(taskSortKey(a)))"
+            v-for="t in sortedList"
             :key="t.id"
             class="task-card"
             :class="'cat-' + (t.category || 'CUSTOM').toLowerCase()"

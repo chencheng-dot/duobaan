@@ -1,11 +1,12 @@
 package org.example.duobaan.controller;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.example.duobaan.model.ChatMode;
 import org.example.duobaan.model.dto.MediaResponse;
-import org.example.duobaan.service.ChatService;
+import org.example.duobaan.service.ChatAppendRetry;
 import org.example.duobaan.service.MediaService;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -17,6 +18,8 @@ import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -33,12 +36,14 @@ import tools.jackson.databind.ObjectMapper;
 public class MediaController {
 
     private final MediaService mediaService;
-    private final ChatService chatService;
+    private final ChatAppendRetry chatAppendRetry;
     private final ObjectMapper objectMapper;
 
-    public MediaController(MediaService mediaService, ChatService chatService, ObjectMapper objectMapper) {
+    private static final Logger log = LoggerFactory.getLogger(MediaController.class);
+
+    public MediaController(MediaService mediaService, ChatAppendRetry chatAppendRetry, ObjectMapper objectMapper) {
         this.mediaService = mediaService;
-        this.chatService = chatService;
+        this.chatAppendRetry = chatAppendRetry;
         this.objectMapper = objectMapper;
     }
 
@@ -73,9 +78,10 @@ public class MediaController {
                                     @RequestParam(value = "mode", required = false) String mode) {
         MediaResponse res = mediaService.transcribeAudio(file);
         if (res.text() != null && !res.text().isBlank()) {
-            // 把转写结果当「助手文本消息」入库，之后用户可以直接当作上下文给 LLM 用
+            // 音频内容属于「用户提供的输入」，不是助手说的话：必须以 user 身份入库。
+            // 若按 assistant 入库，任意音频内容都会变成「模型自己说过的话」进入上下文（提示注入 / 角色混淆）。
             ChatMode cm = parseMode(mode);
-            chatService.appendAndTrim(cm, "assistant", "[语音转写结果]\n" + res.text());
+            chatAppendRetry.appendAndTrimWithRetry(cm, "user", "[用户上传音频的转写结果，非助手发言]\n" + res.text());
         }
         return res;
     }
@@ -113,13 +119,49 @@ public class MediaController {
             if ("succeeded".equalsIgnoreCase(status) || "pending".equalsIgnoreCase(status)) {
                 Map<String, Object> rich = new java.util.HashMap<>();
                 rich.put("kind", kind);
-                rich.put("payload", objectMapper.convertValue(resp, Object.class));
+                rich.put("payload", slimPayload(resp));
                 rich.put("text", fallbackText);
                 content = "%%RICH_MEDIA%%" + objectMapper.writeValueAsString(rich);
             }
-        } catch (Exception ignore) {
+        } catch (Exception e) {
+            log.warn("富媒体内容序列化失败，降级为纯文本入库：{}", e.getMessage());
         }
-        chatService.appendAndTrim(cm, role, content);
+        chatAppendRetry.appendAndTrimWithRetry(cm, role, content);
+    }
+
+    /**
+     * 入库前瘦身：绝不把整段音频和超大 base64 图片写进 chat_message。
+     * 原实现直接 convertValue(整个响应)，TTS 的 audioBytes（base64 后 +33%）与图片 b64Data
+     * 会以 MEDIUMTEXT 形式进库，每轮历史查询又把它们读回堆里，DB 与堆双膨胀。
+     * 这里：音频一律不入库（刷新后重新生成）；图片 b64 在阈值内保留以维持「刷新后仍可看图」，
+     * 超过阈值只留 url 并标记 b64Omitted，由前端提示重新生成。
+     */
+    private static final int MAX_INLINE_B64_CHARS = 200_000;   // ≈150KB 图片
+
+    private static Map<String, Object> slimPayload(MediaResponse resp) {
+        Map<String, Object> p = new java.util.HashMap<>();
+        p.put("kind", resp.kind());
+        p.put("status", resp.status());
+        p.put("message", resp.message());
+        p.put("text", resp.text());
+        p.put("profileId", resp.profileId());
+        List<Map<String, Object>> items = new java.util.ArrayList<>();
+        if (resp.items() != null) {
+            for (MediaResponse.MediaItem it : resp.items()) {
+                Map<String, Object> m = new java.util.HashMap<>();
+                m.put("url", it.url());
+                m.put("revisedPrompt", it.revisedPrompt());
+                String b64 = it.b64Data();
+                if (b64 != null && b64.length() <= MAX_INLINE_B64_CHARS) {
+                    m.put("b64Data", b64);
+                } else if (b64 != null) {
+                    m.put("b64Omitted", true);
+                }
+                items.add(m);
+            }
+        }
+        p.put("items", items);
+        return p;
     }
 
     private static ChatMode parseMode(String m) {

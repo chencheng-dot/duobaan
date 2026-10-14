@@ -65,15 +65,15 @@ public class ChatService {
     public ChatMessage appendAndTrim(ChatMode mode, String role, String content) {
         if (content == null) content = "";
         ChatMessage saved = repo.save(new ChatMessage(mode, role, content));
-
-        long total = repo.countByMode(mode);
-        if (total > MAX_HISTORY_PER_MODE) {
-            int excess = (int) (total - MAX_HISTORY_PER_MODE);
-            List<Long> oldestIds = repo.findOldestIdsByMode(
-                    mode, PageRequest.of(0, excess));
-            if (oldestIds != null && !oldestIds.isEmpty()) {
-                repo.deleteAllByIdInBatch(oldestIds);
-            }
+        // 原生 SQL 不参与 Hibernate 自动 flush，必须先显式 flush 把新行落库，
+        // 否则下面的取 id 查询看不到刚写入的行，会稳定多留一条（50+1）。
+        repo.flush();
+        // 主键 id 列表法：先取「跳过最新 keep 条之后」的那些行 id，再按主键删除。
+        // DELETE 只命中列出的 id（主键等值点查），不再扫描 id 区间 → 并发新插入的行不会被「遇到」。
+        // offset = keep（跳过最新 50 条），limit 1000 只是兜底上限（正常每次只多出 1 条）。
+        List<Integer> stale = repo.findTrimIds(mode.name(), Math.max(0, MAX_HISTORY_PER_MODE), 1000);
+        if (!stale.isEmpty()) {
+            repo.deleteByIds(stale);
         }
         return saved;
     }

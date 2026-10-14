@@ -5,6 +5,7 @@ import java.time.Duration;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
@@ -23,9 +24,20 @@ public class RestClientConfig {
     }
 
     @Bean
+    @Primary
     public RestClient externalRestClient(HttpClient httpClient, DuobaanProperties props) {
         JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
         factory.setReadTimeout(Duration.ofSeconds(props.getLlm().getTimeoutSeconds()));
+        return RestClient.builder()
+                .requestFactory(factory)
+                .build();
+    }
+
+    /** 长耗时路径（ASR 等）专用：读超时 180s，不受全局 llm 超时约束 */
+    @Bean
+    public RestClient mediaRestClient(HttpClient httpClient) {
+        JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
+        factory.setReadTimeout(Duration.ofSeconds(180));
         return RestClient.builder()
                 .requestFactory(factory)
                 .build();

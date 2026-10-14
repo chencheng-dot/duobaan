@@ -9,7 +9,6 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 
 /**
@@ -30,7 +29,8 @@ public class ChatMessage {
     @Column(name = "chat_role", nullable = false, length = 20)
     private String role; // user / assistant
 
-    @Lob
+    // @Lob 与 columnDefinition="MEDIUMTEXT" 语义重复：@Lob 会让 Hibernate 按 CLOB 流式绑定，
+    // 而列本身已是 MEDIUMTEXT。统一只保留显式 columnDefinition，避免两套类型推导打架。
     @Column(nullable = false, columnDefinition = "MEDIUMTEXT")
     private String content;
 

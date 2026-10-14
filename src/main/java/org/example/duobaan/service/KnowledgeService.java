@@ -1,10 +1,13 @@
 package org.example.duobaan.service;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.example.duobaan.model.KnowledgeBase;
 import org.example.duobaan.model.KnowledgeChunk;
@@ -14,6 +17,8 @@ import org.example.duobaan.model.dto.KbDTO;
 import org.example.duobaan.model.dto.RetrievedChunk;
 import org.example.duobaan.repository.KnowledgeBaseRepository;
 import org.example.duobaan.repository.KnowledgeChunkRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -36,24 +41,31 @@ import org.springframework.util.StringUtils;
 @Service
 public class KnowledgeService {
 
+    private static final Logger log = LoggerFactory.getLogger(KnowledgeService.class);
+
     /** 召回条数上限 */
     private static final int TOP_K = 4;
     /** 余弦相似度阈值，低于该值视为无关，不注入 LLM */
     private static final double MIN_SCORE = 0.35;
+    /** 单个知识库文档体积上限（10MB）：multipart 全局上限之外再自查一道，避免整体读进内存 */
+    private static final long MAX_DOC_BYTES = 10L * 1024 * 1024;
 
     private final KnowledgeBaseRepository kbRepo;
     private final KnowledgeChunkRepository chunkRepo;
     private final EmbeddingService embeddingService;
     private final RedisVectorService redisVectorService;
+    private final KnowledgeChunkWriter chunkWriter;
 
     public KnowledgeService(KnowledgeBaseRepository kbRepo,
                             KnowledgeChunkRepository chunkRepo,
                             EmbeddingService embeddingService,
-                            RedisVectorService redisVectorService) {
+                            RedisVectorService redisVectorService,
+                            KnowledgeChunkWriter chunkWriter) {
         this.kbRepo = kbRepo;
         this.chunkRepo = chunkRepo;
         this.embeddingService = embeddingService;
         this.redisVectorService = redisVectorService;
+        this.chunkWriter = chunkWriter;
     }
 
     // ====================== 知识库 CRUD ======================
@@ -80,9 +92,14 @@ public class KnowledgeService {
         int chunkCount = 0;
         if (description != null && !description.isBlank()) {
             try {
-                chunkCount = addDocument(kb.getId(), description).chunkCount();
-            } catch (Exception ignore) {
-                // 分块失败不阻塞知识库创建
+                // 必须走独立 bean（KnowledgeChunkWriter），不能写成 this.addDocument(...)：
+                // 自调用不经过代理，@Transactional 会失效，从而产生「半成品分块」。
+                // createBase 刻意不加 @Transactional：writer 用自己的事务独立提交，
+                // 库本身保留、描述分块整体回滚（要么全有要么全无），失败原因已记日志。
+                chunkCount = chunkWriter.addDocument(kb.getId(), description).chunkCount();
+            } catch (Exception e) {
+                // 分块失败不阻塞知识库创建，但不再静默吞异常
+                log.warn("知识库 {} 的初始描述分块失败：{}", kb.getId(), e.toString(), e);
             }
         }
         return toDTO(kb, chunkCount);
@@ -99,42 +116,13 @@ public class KnowledgeService {
 
     // ====================== 文档 / 分块 ======================
 
-    @Transactional
+    /**
+     * 写入文档：对外签名（参数与返回类型 KbAddResult）保持不变，内部薄委托给独立 bean。
+     * 事务边界在 KnowledgeChunkWriter.addDocument 上：跨 bean 调用经过代理，事务才真正生效；
+     * 原来的 this.addDocument(...) 自调用不开启事务，正是「半成品分块」的根因。
+     */
     public KbAddResult addDocument(Long kbId, String text) {
-        KnowledgeBase kb = findOrThrow(kbId);
-        List<String> chunks = chunk(text, kb.getSplitStrategy(),
-                kb.getChunkSize() == null ? 500 : kb.getChunkSize(),
-                kb.getChunkOverlap() == null ? 50 : kb.getChunkOverlap());
-        if (chunks.isEmpty()) {
-            return new KbAddResult(0, embeddingService.isReady());
-        }
-        List<float[]> vectors = embeddingService.isReady()
-                ? embeddingService.embed(chunks)
-                : List.of();
-
-        int startIndex = (int) chunkRepo.countByKbId(kbId);
-        int saved = 0;
-        for (int i = 0; i < chunks.size(); i++) {
-            String c = chunks.get(i);
-            if (c.isBlank()) {
-                continue;
-            }
-            KnowledgeChunk kc = new KnowledgeChunk();
-            kc.setKbId(kbId);
-            kc.setContent(c);
-            kc.setChunkIndex(startIndex + saved);
-            kc.setCreatedAt(LocalDateTime.now());
-            // embedding 列保留为空（向量存 Redis）
-            kc.setEmbedding(null);
-            KnowledgeChunk savedChunk = chunkRepo.save(kc);
-
-            float[] v = (vectors != null && vectors.size() > i) ? vectors.get(i) : null;
-            if (v != null) {
-                redisVectorService.storeVector(kbId, savedChunk.getId(), v);
-            }
-            saved++;
-        }
-        return new KbAddResult(saved, embeddingService.isReady());
+        return chunkWriter.addDocument(kbId, text);
     }
 
     @Transactional
@@ -147,13 +135,19 @@ public class KnowledgeService {
         if (!(filename.endsWith(".txt") || filename.endsWith(".md"))) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "仅支持 .txt / .md 文件");
         }
+        // 读取之前先卡体积，避免超大文件被整体读进内存（与全局 multipart 上限互为补充）
+        if (file.getSize() > MAX_DOC_BYTES) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "文件过大（≤10MB）：" + file.getOriginalFilename());
+        }
         try {
             String content = new String(file.getBytes(), java.nio.charset.StandardCharsets.UTF_8);
             return addDocument(kbId, content);
         } catch (ResponseStatusException e) {
             throw e;
         } catch (Exception e) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "读取文件失败：" + e.getMessage());
+            // 第 4 批：原文只进日志，用户只看到可读文案（本分支最多泄露本地路径）
+            log.warn("读取知识库文件失败", e);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "读取文件失败，请确认文件可访问。");
         }
     }
 
@@ -219,65 +213,77 @@ public class KnowledgeService {
         if (query == null || query.isBlank()) {
             return List.of();
         }
+        int n = Math.max(1, Math.min(topK, TOP_K));
         float[] qv = embeddingService.embedOne(query.trim());
         if (qv == null) {
             return List.of();
         }
-        // 取所有有向量的知识库 ID
+
         List<Long> kbIds = new ArrayList<>(redisVectorService.getAllKbIds());
         if (kbIds.isEmpty()) {
             return List.of();
         }
-        // 知识库 id → 名称
-        Map<Long, String> kbNames = new HashMap<>();
-        kbRepo.findAll().forEach(kb -> kbNames.put(kb.getId(), kb.getName()));
 
-        // 收集所有候选 chunkId
+        // chunkId → kbId 只建一次映射（避免对同一 kb 重复调用 getChunkIds）
+        Map<Long, Long> chunkToKb = new HashMap<>();
         List<Long> allChunkIds = new ArrayList<>();
         for (Long kbId : kbIds) {
-            allChunkIds.addAll(redisVectorService.getChunkIds(kbId));
+            for (Long cid : redisVectorService.getChunkIds(kbId)) {
+                if (chunkToKb.put(cid, kbId) == null) {
+                    allChunkIds.add(cid);
+                }
+            }
         }
         if (allChunkIds.isEmpty()) {
             return List.of();
         }
-        // 批量取向量
-        List<float[]> vectors = redisVectorService.getVectors(allChunkIds);
-        // chunkId → kbId 映射
-        Map<Long, Long> chunkToKb = new HashMap<>();
-        for (Long kbId : kbIds) {
-            for (Long cid : redisVectorService.getChunkIds(kbId)) {
-                chunkToKb.put(cid, kbId);
-            }
-        }
-        // 批量取分块内容（用 findAllById）
-        Map<Long, String> contents = new HashMap<>();
-        chunkRepo.findAllById(allChunkIds).forEach(c -> contents.put(c.getId(), c.getContent()));
 
-        List<ScoredChunk> scored = new ArrayList<>();
+        // 批量取向量（单次 mget）
+        List<float[]> vectors = redisVectorService.getVectors(allChunkIds);
+        List<Scored> ranked = new ArrayList<>();
         for (int i = 0; i < allChunkIds.size(); i++) {
             float[] cv = vectors.get(i);
             if (cv == null) continue;
             double s = cosine(qv, cv);
             if (s >= MIN_SCORE) {
-                Long cid = allChunkIds.get(i);
-                scored.add(new ScoredChunk(
-                        cid,
-                        chunkToKb.get(cid),
-                        contents.get(cid),
-                        s));
+                ranked.add(new Scored(allChunkIds.get(i), s));
             }
         }
-        scored.sort((a, b) -> Double.compare(b.score, a.score));
-        int n = Math.max(1, Math.min(topK, TOP_K));
+        ranked.sort(Comparator.comparingDouble(Scored::score).reversed());
+        List<Scored> top = ranked.stream().limit(n).toList();
+        if (top.isEmpty()) {
+            return List.of();
+        }
+        List<Long> topIds = top.stream().map(Scored::id).toList();
+
+        // 只对 top-N 查正文
+        Map<Long, String> contents = new HashMap<>();
+        chunkRepo.findAllById(topIds).forEach(c -> contents.put(c.getId(), c.getContent()));
+
+        // 知识库名称只查 top-N 涉及到的 kb（单次 findAllById）
+        Set<Long> topKbIds = new HashSet<>();
+        for (Long cid : topIds) {
+            Long kid = chunkToKb.get(cid);
+            if (kid != null) {
+                topKbIds.add(kid);
+            }
+        }
+        Map<Long, String> kbNames = new HashMap<>();
+        kbRepo.findAllById(topKbIds).forEach(kb -> kbNames.put(kb.getId(), kb.getName()));
+
+        Map<Long, Double> scoreById = top.stream()
+                .collect(Collectors.toMap(Scored::id, Scored::score));
         List<RetrievedChunk> out = new ArrayList<>();
-        for (ScoredChunk sc : scored) {
-            if (out.size() >= n) break;
-            out.add(new RetrievedChunk(
-                    sc.kbId,
-                    kbNames.getOrDefault(sc.kbId, "知识库"),
-                    sc.chunkId,
-                    sc.content,
-                    sc.score));
+        for (Long cid : topIds) {
+            String content = contents.get(cid);
+            if (content == null || content.isBlank()) {
+                // Redis 里有向量、MySQL 里却查不到正文：向量孤儿（分块已删，或上次写入事务中途回滚，
+                // 因为 Redis 不参与 JPA 事务）。必须跳过——否则会把字面 "null" 拼进 LLM 的 RAG 上下文。
+                continue;
+            }
+            Long kbId = chunkToKb.get(cid);
+            out.add(new RetrievedChunk(kbId, kbNames.getOrDefault(kbId, "知识库"),
+                    cid, content, scoreById.getOrDefault(cid, 0.0)));
         }
         return out;
     }
@@ -287,18 +293,25 @@ public class KnowledgeService {
      * 无命中返回 null（调用方不加任何 RAG 提示）。
      */
     public String retrieveContext(String query) {
-        List<RetrievedChunk> hits = search(query, TOP_K);
-        if (hits.isEmpty()) {
+        // RAG 失败不得影响对话主链路：整体兜底
+        try {
+            List<RetrievedChunk> hits = search(query, TOP_K);
+            if (hits.isEmpty()) {
+                return null;
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("以下是知识库中与用户问题相关的参考资料，请优先依据这些内容回答；若与问题无关请忽略：\n");
+            int i = 1;
+            for (RetrievedChunk h : hits) {
+                sb.append("[").append(i++).append("]（知识库「").append(h.kbName()).append("」）：")
+                        .append(h.content()).append("\n");
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            // 只降级为「无 RAG 上下文」，但必须留痕，便于排查（embedding / Redis 故障等）
+            log.warn("知识库检索失败，本轮对话不注入 RAG 上下文：{}", e.toString(), e);
             return null;
         }
-        StringBuilder sb = new StringBuilder();
-        sb.append("以下是知识库中与用户问题相关的参考资料，请优先依据这些内容回答；若与问题无关请忽略：\n");
-        int i = 1;
-        for (RetrievedChunk h : hits) {
-            sb.append("[").append(i++).append("]（知识库「").append(h.kbName()).append("」）：")
-                    .append(h.content()).append("\n");
-        }
-        return sb.toString();
     }
 
     // ====================== 分块策略 ======================
@@ -451,6 +464,6 @@ public class KnowledgeService {
         return s == null ? null : s.trim();
     }
 
-    private record ScoredChunk(Long chunkId, Long kbId, String content, double score) {
+    private record Scored(Long id, double score) {
     }
 }

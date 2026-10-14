@@ -80,6 +80,11 @@ public class SchemaMigrator {
             jdbc.execute("ALTER TABLE `task` ADD KEY `idx_task_deleted_at` (`deleted_at`)");
             log.info("[SchemaMigrator] idx_task_deleted_at 索引已添加");
         }
+        // index: idx_task_group_deleted_created（按分组+软删+创建时间查流程表）
+        if (!indexExists(dbName, "task", "idx_task_group_deleted_created")) {
+            jdbc.execute("ALTER TABLE `task` ADD KEY `idx_task_group_deleted_created` (`task_group`, `deleted`, `created_at`)");
+            log.info("[SchemaMigrator] idx_task_group_deleted_created 索引已添加");
+        }
     }
 
     /** chat_message 表：补齐复合索引 idx_chat_mode_created，让按 mode + 时间倒序/正序走索引 */

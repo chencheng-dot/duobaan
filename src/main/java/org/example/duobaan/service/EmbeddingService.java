@@ -8,6 +8,10 @@ import java.util.Map;
 import org.example.duobaan.model.ApiProfile;
 import org.example.duobaan.model.ApiProfileType;
 import org.example.duobaan.model.dto.EmbeddingResponse;
+import org.example.duobaan.util.OutboundUrlGuard;
+import org.example.duobaan.util.UrlSanitizer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
@@ -20,6 +24,8 @@ import tools.jackson.databind.ObjectMapper;
  */
 @Service
 public class EmbeddingService {
+
+    private static final Logger log = LoggerFactory.getLogger(EmbeddingService.class);
 
     private final ApiProfileService apiProfileService;
     private final RestClient restClient;
@@ -59,8 +65,15 @@ public class EmbeddingService {
             Map<String, Object> body = new HashMap<>();
             body.put("model", emb.getModel());
             body.put("input", texts);
+            String base = UrlSanitizer.sanitizeBaseUrl(emb.getBaseUrl());
+            if (base == null || base.isBlank()) {
+                log.warn("向量化 baseUrl 为空或非法，跳过 RAG：{}", emb.getBaseUrl());
+                return List.of();
+            }
+            String url = base + "/embeddings";
+            OutboundUrlGuard.verify(url);   // 出网地址守卫：阻断内网/环回/元数据地址
             EmbeddingResponse resp = restClient.post()
-                    .uri(emb.getBaseUrl() + "/embeddings")
+                    .uri(url)
                     .header("Authorization", "Bearer " + emb.getApiKey())
                     .header("Content-Type", "application/json")
                     .body(body)
@@ -84,7 +97,8 @@ public class EmbeddingService {
             }
             return out;
         } catch (Exception e) {
-            // 向量化失败不阻断对话，跳过 RAG 即可
+            // 向量化失败不阻断对话，跳过 RAG 即可（但需记录原因，避免静默失效）
+            log.warn("向量化失败，跳过 RAG：{}", e.getMessage());
             return List.of();
         }
     }

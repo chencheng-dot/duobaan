@@ -2,6 +2,8 @@ package org.example.duobaan.controller;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.example.duobaan.model.ChatMode;
 import org.example.duobaan.model.ChatMessage;
@@ -10,11 +12,14 @@ import org.example.duobaan.model.dto.ChatRequest;
 import org.example.duobaan.model.dto.ChatResponse;
 import org.example.duobaan.model.dto.ParseTasksRequest;
 import org.example.duobaan.model.dto.ParsedTask;
+import org.example.duobaan.service.ChatAppendRetry;
 import org.example.duobaan.service.ChatService;
 import org.example.duobaan.service.KnowledgeService;
 import org.example.duobaan.service.LlmGatewayService;
 import org.example.duobaan.service.TaskService;
 import org.example.duobaan.service.WeatherService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -30,27 +35,33 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  * - /chat/stream：流式对话（SSE，逐 token 推送）
  * - /parse-tasks：自然语言指令拆单，返回结构化任务列表
  * - /history：拉取某 mode 下最近 N 条历史（用于刷新页面后恢复）
- * 每次对话(user+assistant)均写入 chat_message 表，每 mode 自动限长 50 条（ChatService.appendAndTrim）。
+ * 每次对话(user+assistant)均写入 chat_message 表，每 mode 自动限长 50 条（ChatAppendRetry.appendAndTrimWithRetry）。
  */
 @RestController
 @RequestMapping("/api/llm")
 public class LlmController {
 
+    private static final Logger log = LoggerFactory.getLogger(LlmController.class);
+    private static final long SSE_TIMEOUT_MS = 5 * 60 * 1000L;
+
     private final LlmGatewayService llmGateway;
     private final WeatherService weatherService;
     private final TaskService taskService;
     private final ChatService chatService;
+    private final ChatAppendRetry chatAppendRetry;
     private final KnowledgeService knowledgeService;
     private final ExecutorService sseExecutor;
 
     public LlmController(LlmGatewayService llmGateway, WeatherService weatherService,
                          TaskService taskService, ChatService chatService,
+                         ChatAppendRetry chatAppendRetry,
                          KnowledgeService knowledgeService,
                          @Qualifier("sseExecutor") ExecutorService sseExecutor) {
         this.llmGateway = llmGateway;
         this.weatherService = weatherService;
         this.taskService = taskService;
         this.chatService = chatService;
+        this.chatAppendRetry = chatAppendRetry;
         this.knowledgeService = knowledgeService;
         this.sseExecutor = sseExecutor;
     }
@@ -79,12 +90,12 @@ public class LlmController {
 
         // 1) 入库用户消息
         if (!userMsg.isBlank()) {
-            chatService.appendAndTrim(mode, "user", userMsg);
+            chatAppendRetry.appendAndTrimWithRetry(mode, "user", userMsg);
         }
         // 2) 调用大模型
         ChatResponse resp = llmGateway.chat(userMsg, mode, systemContext);
         // 3) 入库助手回复（含降级/错误提示也保存，刷新后看到一样的内容）
-        chatService.appendAndTrim(mode, "assistant", resp.reply());
+        chatAppendRetry.appendAndTrimWithRetry(mode, "assistant", resp.reply());
         return resp;
     }
 
@@ -95,48 +106,64 @@ public class LlmController {
      */
     @PostMapping("/chat/stream")
     public SseEmitter chatStream(@RequestBody ChatRequest req) {
-        // 0 = 不超时，由流式结束自行 complete
-        SseEmitter emitter = new SseEmitter(0L);
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
         ChatMode mode = req.mode() != null ? req.mode() : ChatMode.WORK;
         String userMsg = req.message() == null ? "" : req.message();
         String systemContext = buildSystemContext(userMsg);
 
-        // 1) 入库用户消息（在执行线程内做，避免阻塞 sse 返回；但这里很快，先做也可以）
+        // 1) 入库用户消息
         if (!userMsg.isBlank()) {
-            chatService.appendAndTrim(mode, "user", userMsg);
+            chatAppendRetry.appendAndTrimWithRetry(mode, "user", userMsg);
         }
 
         StringBuilder assistantReply = new StringBuilder();
+        AtomicBoolean closed = new AtomicBoolean(false);
+        emitter.onCompletion(() -> closed.set(true));
+        emitter.onTimeout(() -> { closed.set(true); emitter.complete(); });
+        emitter.onError(e -> closed.set(true));
 
-        sseExecutor.execute(() -> {
-            try {
-                llmGateway.chatStream(userMsg, mode, systemContext, chunk -> {
-                    // 累积完整回复，入库时用
-                    if (chunk != null) assistantReply.append(chunk);
-                    try {
-                        emitter.send(SseEmitter.event().name("delta").data(chunk == null ? "" : chunk));
-                    } catch (Exception ignore) {
-                        // 客户端可能已断开，停止再发
+        try {
+            sseExecutor.execute(() -> {
+                try {
+                    llmGateway.chatStream(userMsg, mode, systemContext, closed::get, chunk -> {
+                        // 累积完整回复，入库时用
+                        if (chunk != null) assistantReply.append(chunk);
+                        if (closed.get()) return;
+                        try {
+                            emitter.send(SseEmitter.event().name("delta").data(chunk == null ? "" : chunk));
+                        } catch (Exception e) {
+                            // 客户端可能已断开，停止再发
+                            closed.set(true);
+                        }
+                    });
+                    // 正常结束 → 入库助手完整回复 + 发 done
+                    chatAppendRetry.appendAndTrimWithRetry(mode, "assistant", assistantReply.toString());
+                    if (!closed.get()) {
+                        try {
+                            emitter.send(SseEmitter.event().name("done").data(""));
+                        } catch (Exception ignore) {
+                        }
+                        emitter.complete();
                     }
-                });
-                // 正常结束 → 入库助手完整回复 + 发 done
-                chatService.appendAndTrim(mode, "assistant", assistantReply.toString());
-                try {
-                    emitter.send(SseEmitter.event().name("done").data(""));
-                } catch (Exception ignore) {
+                } catch (Exception e) {
+                    // 异常：把已收到的 delta + 可读错误提示 一起入库。
+                    // e.getMessage() 可能含上游报文 / 解析到的内网地址，只进日志，绝不回吐前端或写入聊天记录
+                    // （出网守卫的拒绝就抛在本 catch，是这里的常见来源）。
+                    log.error("SSE 流式对话失败 mode={}", mode, e);
+                    String friendly = LlmGatewayService.friendlyTransportError(e.getMessage());
+                    chatAppendRetry.appendAndTrimWithRetry(mode, "assistant", assistantReply + "\n" + friendly);
+                    if (!closed.get()) {
+                        try {
+                            emitter.send(SseEmitter.event().name("error").data(friendly));
+                        } catch (Exception ignore) {
+                        }
+                        emitter.complete();
+                    }
                 }
-                emitter.complete();
-            } catch (Exception e) {
-                // 异常：把已收到的 delta + 错误提示 一起入库
-                String finalReply = assistantReply + "\n[流式错误: " + e.getMessage() + "]";
-                chatService.appendAndTrim(mode, "assistant", finalReply);
-                try {
-                    emitter.send(SseEmitter.event().name("error").data(e.getMessage()));
-                } catch (Exception ignore) {
-                }
-                emitter.complete();
-            }
-        });
+            });
+        } catch (RejectedExecutionException e) {
+            emitter.completeWithError(new IllegalStateException("当前流式会话过多，请稍后重试"));
+        }
         return emitter;
     }
 
@@ -169,10 +196,19 @@ public class LlmController {
     private String buildSystemContext(String userMsg) {
         String base = "天气：" + weatherService.now().summary()
                 + "\n" + taskService.contextSummary();
-        String rag = knowledgeService.retrieveContext(userMsg);
+        // 过短消息（<2 字 / 纯符号）跳过 RAG 检索，避免无意义的全量向量扫描
+        String rag = shouldRetrieve(userMsg) ? knowledgeService.retrieveContext(userMsg) : null;
         if (rag != null && !rag.isBlank()) {
             base += "\n" + rag;
         }
         return base;
+    }
+
+    /** 是否值得做知识库检索：至少 2 个字符且含中英文/数字 */
+    private static boolean shouldRetrieve(String msg) {
+        if (msg == null) return false;
+        String t = msg.trim();
+        if (t.length() < 2) return false;
+        return t.chars().anyMatch(Character::isLetterOrDigit);
     }
 }

@@ -10,8 +10,12 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 import org.example.duobaan.config.DuobaanProperties;
 import org.example.duobaan.model.ApiProfileType;
@@ -23,6 +27,9 @@ import org.example.duobaan.model.dto.LlmChat.Message;
 import org.example.duobaan.model.dto.LlmConfigDTO;
 import org.example.duobaan.model.dto.LlmStreamChunk;
 import org.example.duobaan.model.dto.ParsedTask;
+import org.example.duobaan.util.OutboundUrlGuard;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
@@ -36,6 +43,12 @@ import tools.jackson.databind.ObjectMapper;
  */
 @Service
 public class LlmGatewayService {
+
+    private static final Logger log = LoggerFactory.getLogger(LlmGatewayService.class);
+
+    /** 用词边界匹配状态码，避免把 "4040ms" 这类子串误判成 HTTP 404 / 401 */
+    private static final Pattern AUTH_FAILED = Pattern.compile("\\b401\\b");
+    private static final Pattern NOT_FOUND = Pattern.compile("\\b404\\b");
 
     private final RestClient restClient;
     private final HttpClient httpClient;
@@ -82,10 +95,12 @@ public class LlmGatewayService {
         List<Message> messages = new ArrayList<>();
         messages.add(new Message("system", buildSystemPrompt(mode, systemContext)));
         messages.add(new Message("user", userMessage));
+        String url = cfg.baseUrl() + "/chat/completions";
+        OutboundUrlGuard.verify(url);   // 出网地址守卫：阻断内网/环回/元数据地址
         try {
             LlmChat.Request request = new LlmChat.Request(cfg.model(), messages);
             LlmChat.Response resp = restClient.post()
-                    .uri(cfg.baseUrl() + "/chat/completions")
+                    .uri(url)
                     .header("Authorization", "Bearer " + cfg.apiKey())
                     .header("Content-Type", "application/json")
                     .body(request)
@@ -96,32 +111,40 @@ public class LlmGatewayService {
             }
             return new ChatResponse(resp.choices().get(0).message().content(), false);
         } catch (Exception e) {
-            return new ChatResponse("大模型调用失败：" + e.getMessage(), true);
+            // 原始 message 可能含上游报文 / 解析到的内网地址，只写日志；对用户只回可读文案
+            log.warn("非流式对话调用失败：{}", e.getMessage());
+            return new ChatResponse(friendlyTransportError(e.getMessage()), true);
         }
     }
 
     /**
      * 流式对话：调用大模型 stream 接口，逐 token 回调 onDelta。
      * 调用方负责把 onDelta 投递到 SSE 通道。
+     *
+     * @param cancelled 取消信号：返回 true 时立即停止读上游并关闭连接，
+     *                  避免客户端断开后线程与上游连接一直被占到生成结束（32 个 SSE 线程会被打满）
      */
-    public void chatStream(String userMessage, ChatMode mode, String systemContext, Consumer<String> onDelta) {
+    public void chatStream(String userMessage, ChatMode mode, String systemContext,
+                           BooleanSupplier cancelled, Consumer<String> onDelta) {
         LlmConfigDTO cfg = currentConfig();
         if (!isConfigured(cfg)) {
             onDelta.accept(degradedHint(mode));
             return;
         }
+        String url = cfg.baseUrl() + "/chat/completions";
+        OutboundUrlGuard.verify(url);   // 出网地址守卫：阻断内网/环回/元数据地址
         try {
-            String body = objectMapper.writeValueAsString(new java.util.HashMap<>() {
-                {
-                    put("model", cfg.model());
-                    put("stream", true);
-                    put("messages", List.of(
-                            new Message("system", buildSystemPrompt(mode, systemContext)),
-                            new Message("user", userMessage)));
-                }
-            });
+            // 用显式 Map 构造请求体，替代原来的「双大括号匿名内部类」：
+            // 后者会为每个请求多生成一个匿名类（持有外层 this，易造成隐式引用泄漏），可读性也差。
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("model", cfg.model());
+            payload.put("stream", true);
+            payload.put("messages", List.of(
+                    new Message("system", buildSystemPrompt(mode, systemContext)),
+                    new Message("user", userMessage)));
+            String body = objectMapper.writeValueAsString(payload);
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(cfg.baseUrl() + "/chat/completions"))
+                    .uri(URI.create(url))
                     .header("Authorization", "Bearer " + cfg.apiKey())
                     .header("Content-Type", "application/json")
                     .timeout(Duration.ofSeconds(cfg.timeoutSeconds()))
@@ -131,6 +154,14 @@ public class LlmGatewayService {
             HttpResponse<InputStream> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofInputStream());
             int status = resp.statusCode();
             if (status >= 400) {
+                // 必须消费并关闭响应体：原来直接 return 会让连接与流悬挂，长期运行会耗尽连接池。
+                // 排障需要的上游原文只写日志（截前 512 字节），对用户只回可读文案。
+                try (InputStream in = resp.body()) {
+                    byte[] preview = in.readNBytes(512);
+                    if (preview.length > 0) {
+                        log.warn("LLM 流式上游返回 {}：{}", status, new String(preview, StandardCharsets.UTF_8));
+                    }
+                }
                 onDelta.accept(friendlyHttpError(status));
                 return;
             }
@@ -138,6 +169,10 @@ public class LlmGatewayService {
                     new InputStreamReader(resp.body(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    // 客户端已断开 → 停止读上游；break 即触发 try-with-resources 关闭连接，上游也随之停止计费
+                    if (cancelled != null && cancelled.getAsBoolean()) {
+                        break;
+                    }
                     if (!line.startsWith("data:")) {
                         continue;
                     }
@@ -162,7 +197,7 @@ public class LlmGatewayService {
                 }
             }
         } catch (Exception e) {
-            onDelta.accept("\n" + friendlyStreamError(e.getMessage()));
+            onDelta.accept("\n" + friendlyTransportError(e.getMessage()));
         }
     }
 
@@ -181,13 +216,15 @@ public class LlmGatewayService {
                 不要任何解释、不要 markdown 代码块、不要多余文字。
                 group 取今天能做的用 TODAY，需要明天做的用 TOMORROW。
                 """;
+        String url = cfg.baseUrl() + "/chat/completions";
+        OutboundUrlGuard.verify(url);   // 出网地址守卫：阻断内网/环回/元数据地址
         try {
             List<Message> messages = List.of(
                     new Message("system", systemPrompt),
                     new Message("user", userMessage));
             LlmChat.Request request = new LlmChat.Request(cfg.model(), messages);
             LlmChat.Response resp = restClient.post()
-                    .uri(cfg.baseUrl() + "/chat/completions")
+                    .uri(url)
                     .header("Authorization", "Bearer " + cfg.apiKey())
                     .header("Content-Type", "application/json")
                     .body(request)
@@ -303,17 +340,23 @@ public class LlmGatewayService {
         };
     }
 
-    /** 流式中断直白提示 */
-    private String friendlyStreamError(String rawMsg) {
-        if (rawMsg == null) return "❌ 流式连接中断，请重试。";
+    /**
+     * 传输层错误 → 直白提示：只做关键词映射，原始 message 一律不外泄（调用方负责把它写进日志）。
+     * 公开为 static 供 controller 的 SSE catch 复用，避免再写一个近乎重复的 friendly* 方法。
+     */
+    public static String friendlyTransportError(String rawMsg) {
+        if (rawMsg == null) return "❌ 连接中断，请重试。";
         if (rawMsg.contains("timed out") || rawMsg.contains("timeout")) {
             return "❌ 请求超时，请检查网络或增大超时时间。";
         }
         if (rawMsg.contains("Connection refused") || rawMsg.contains("No route")) {
             return "❌ 无法连接到接口地址，请检查 Base URL 和网络。";
         }
-        if (rawMsg.contains("401")) return "❌ API Key 无效，请检查 Key 是否填写正确。";
-        if (rawMsg.contains("404")) return "❌ 接口地址错误，请检查 Base URL。";
-        return "❌ 流式连接中断：" + rawMsg;
+        if (rawMsg.contains("禁止访问") || rawMsg.contains("出网地址")) {
+            return "❌ 出网地址被安全策略拒绝，请检查 Base URL 是否指向公网地址。";
+        }
+        if (AUTH_FAILED.matcher(rawMsg).find()) return "❌ API Key 无效，请检查 Key 是否填写正确。";
+        if (NOT_FOUND.matcher(rawMsg).find()) return "❌ 接口地址错误，请检查 Base URL。";
+        return "❌ 连接中断，请稍后重试。";
     }
 }
