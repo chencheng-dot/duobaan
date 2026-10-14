@@ -76,7 +76,7 @@ duobaan/
 | Node.js | ≥ 18 | 用于前端开发与构建 |
 | npm | ≥ 9 | 同上 |
 | MySQL | ≥ 8.0 | 数据库 |
-| Redis | ≥ 6.0 | 知识库向量缓存（可选，未启动时检索自动降级） |
+| Redis | ≥ 3.2 | 知识库向量缓存（可选，未启动时检索自动降级；Windows 版需把 RDB 目录改为可写路径） |
 
 ### 1. 克隆项目
 
@@ -256,11 +256,14 @@ npm run build         # 产物输出到 src/main/resources/static/
 
 | 表名 | 说明 | 关键字段 |
 |---|---|---|
-| `task` | 流程表任务 | title, category, task_group(TODAY/TOMORROW), task_status, source, submitted_at, deleted(软删标记), deleted_at |
-| `chat_message` | 对话记录 | mode(DOPAMINE/WORK), chat_role, content |
-| `api_profile` | 多套 API 配置 | profile_type(LLM/IMAGE/AUDIO/VIDEO/EMBEDDING/WEATHER), provider, base_url, api_key, model_name, is_active, api_host(天气专属), timeout_seconds |
+| `task` | 流程表任务 | title, category, task_group(TODAY/TOMORROW), task_status(TODO/DOING/DONE/SUBMITTED), source(LLM/MANUAL), estimated_minutes, due_at, submitted_at, deleted(软删标记), deleted_at |
+| `chat_message` | 对话记录 | mode(DOPAMINE/WORK), chat_role, content（每个 mode 只保留最近 50 条，超出自动裁剪） |
+| `api_profile` | 多套 API 配置 | profile_type(LLM/IMAGE/AUDIO/VIDEO/EMBEDDING/WEATHER), name, provider, base_url, model, api_key, location(天气城市), cache_ttl_seconds(天气缓存秒数), timeout_seconds, is_active |
 | `knowledge_base` | 知识库 | name, description, split_strategy(PARAGRAPH/SENTENCE/MARKDOWN/SIMPLE), chunk_size, chunk_overlap |
-| `knowledge_chunk` | 知识库分块 | kb_id, content, chunk_index, created_at（向量存 Redis，不存此表） |
+| `knowledge_chunk` | 知识库分块 | kb_id, content, chunk_index, created_at（`embedding` 列保留但恒为 NULL，向量实际存 Redis） |
+| `system_config` | 旧版遗留键值配置 | cfg_key, cfg_value, updated_at（存 v2.x 的 llm.config / weather.config，启动时自动迁移为 `api_profile`） |
+
+> **字段映射提醒**：`api_profile` 里**没有** `api_host` 列 —— 天气的 API Host 复用 `base_url` 列（`location` / `cache_ttl_seconds` 仅天气使用）；旧文档里的 `model_name` 也是错的，实际列名是 `model`。
 
 ### 建表策略
 
@@ -298,7 +301,7 @@ npm run build         # 产物输出到 src/main/resources/static/
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/time/now` | 获取当前时间 |
-| GET | `/api/weather/now` | 获取当前天气（返回 configured 字段标记是否已配置） |
+| GET | `/api/weather/now` | 获取当前天气（`status`：OK / UNCONFIGURED / ERROR；ERROR 时 `message` 为中文原因；未配置时 `configured=false`） |
 
 ### 大模型
 
@@ -335,28 +338,45 @@ npm run build         # 产物输出到 src/main/resources/static/
 | GET | `/api/knowledge/bases/{id}/chunks` | 查看该知识库的分块列表 |
 | DELETE | `/api/knowledge/bases/{id}/chunks` | 清空该知识库分块（同时清 Redis 向量） |
 | POST | `/api/knowledge/bases/{id}/revectorize` | 对已有分块重新向量化（配好 embedding 后补做向量） |
+| POST | `/api/knowledge/search` | 直接用向量检索知识库（body：`{query}`），返回 top-4 命中分块，便于调试检索效果 |
 | GET | `/api/knowledge/status` | 查询 RAG 状态（embeddingReady / redisOk / hint） |
+
+### 多模态生成（图片 / 语音 / 转写 / 视频）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/media/image` | 文生图（body：prompt/size/n/mode）；Dashscope 千问/万相自动走原生异步接口，其余走 OpenAI 兼容 `/images/generations` |
+| POST | `/api/media/speech` | 文生语音 TTS（body：input/voice/format/speed/mode） |
+| POST | `/api/media/transcribe` | 音频转写（multipart `file` + 可选 `mode`）；转写文本以 **user** 身份入库，避免把用户音频内容当成助手发言放进上下文 |
+| POST | `/api/media/video` | 文生视频（body：prompt/seconds/ratio/mode） |
+| GET | `/api/media/poll-task` | 查询 Dashscope 异步任务（`taskId` + `profileId` + `kind=IMAGE\|VIDEO`）；前端每 5 秒轮询一次、最多 12 次（约 60 秒） |
+
+> 未配置对应模型时，以上接口统一返回 HTTP 200 + `status: "degraded"` + 中文提示，不打断对话；富媒体结果以 `%%RICH_MEDIA%%` 前缀 + JSON 存入 `chat_message`，刷新页面可还原图片 / 音频 / 视频。
 
 ### 配置（系统 & 多套 API 配置）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/config/status` | 获取 LLM/天气是否已配置（首页状态栏用） |
-| GET  | `/api/config/llm` | 获取当前生效 LLM 配置（旧接口，兼容 v2.1） |
-| POST | `/api/config/llm` | 保存 LLM 配置（旧接口，内部写入 active profile） |
-| GET  | `/api/config/weather` | 获取当前生效天气配置（旧接口，兼容 v2.1） |
-| POST | `/api/config/weather` | 保存天气配置（旧接口，内部写入 active profile） |
+| GET | `/api/config/providers/all` | 一次返回 6 种类型（LLM/IMAGE/AUDIO/VIDEO/EMBEDDING/WEATHER）的厂商预设，设置页按 Tab 渲染 |
 | GET    | `/api/config/profiles?type=LLM\|WEATHER` | 列出某类型的全部 API 配置（不含明文 Key，仅打码显示） |
+| GET    | `/api/config/profiles/active?type=...` | 取某类型当前生效配置（无则返回 204） |
+| GET    | `/api/config/profiles/{id}` | 取某套配置详情 |
 | POST   | `/api/config/profiles` | 新建一套 API 配置 |
-| PUT    | `/api/config/profiles/{id}` | 更新某套配置 |
+| PUT    | `/api/config/profiles/{id}` | 更新某套配置（Key 传空或打码串时保留原 Key） |
 | DELETE | `/api/config/profiles/{id}` | **物理删除**某套配置（数据库行直接删除，防 Key 泄露） |
 | POST   | `/api/config/profiles/{id}/activate` | 激活某套配置（设为 active，立即生效） |
+| GET | `/api/config/providers` | 旧接口：仅返回 LLM 文本厂商预设（兼容 v3.0 之前前端） |
+| GET  | `/api/config/llm` | 旧接口（兼容 v2.1）：取当前生效 LLM 配置，Key 打码 |
+| POST | `/api/config/llm` | 旧接口：保存 LLM 配置（同名自动配置原地更新，否则新建） |
+| GET  | `/api/config/weather` | 旧接口（兼容 v2.1）：取当前生效天气配置，Key 打码 |
+| POST | `/api/config/weather` | 旧接口：保存天气配置（同名「系统自动保存-WEATHER」原地更新，否则新建） |
 
 ### 美食推荐
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/recommend/meal` | 美食推荐 |
+| POST | `/api/recommend/meal` | 美食推荐（body：心情 / 天气 / 口味 / 用餐方式） |
+| POST | `/api/recommend/adopt?mealTitle=xxx` | 采纳推荐结果：写入「今日」流程表并标记为已完成（query 参数，长度 ≤200） |
 
 ---
 
@@ -398,7 +418,7 @@ MIT
 
 ## 版本更新记录
 
-### v1.0.0 🚀（初始版本 — 涵盖 v1~v3 全部功能）
+### v1.0.0 🚀（初始版本 — 首个可用版本）
 
 **核心功能**
 - 办公流程表：今日/明日分组，CRUD + 状态流转（待办/进行中/完成/已上交），上交小结，零点自动转组
@@ -408,7 +428,6 @@ MIT
 - 大模型对话：SSE 流式输出，办公/多巴胺双模式，对话历史持久化（每 mode 限 50 条，刷新自动恢复）
 - 智能拆单：自然语言 → 结构化任务列表，一键写入流程表
 - 多模态生成：聊天顶栏 6 Tab（智能/文本/图片/转写/朗读/视频），对应模型调用对应接口；异步图片/视频任务持久化 + 自动轮询
-- 多套 API 配置：文本/图片/语音/视频/天气 五套独立 Profile，切换即用，删除即物理删除防 Key 泄露
 - 任务留痕（我的）：已上交/已完成/已删除三栏历史，软删除不丢数据
 
 **技术架构**
@@ -512,5 +531,29 @@ MIT
 | `FlowTable.vue` | 勾选完成后从列表移除 |
 | `ChatPanel.vue` | 移除自动执行任务指令 |
 | `api/index.js` | 新增知识库/硬删除 API |
+
+---
+### v3.0.0 🛡🧩（稳定性加固 + 多套 Profile 统一存储 + 文档修订）
+
+**1. 引入多套 API Profile 体系（文本 / 图片 / 语音 / 视频 / 向量化 / 天气 六类）**
+
+- 六类各自保存多套 Profile，随时切换「当前生效」那套（此前每类只能存一套）
+- 删除某套 = **物理删除数据库行**，明文 Key 不留残片；列表/详情接口只返回打码 Key
+- 旧 v2.x 存在 `system_config` 的 `llm.config` / `weather.config` 在启动时自动迁移为 active profile，老用户无需重填 Key
+- 旧接口 `/api/config/llm`、`/api/config/weather` 继续可用；重复保存同名自动配置时**原地更新**，不再堆积重复行
+- `api_profile` **无 `api_host` 列**：天气 Host 复用 `base_url`，城市与缓存分别用 `location` / `cache_ttl_seconds`
+
+**2. 稳定性与安全加固**
+
+- 对话历史按 mode 只保留最近 50 条，用**单条原生 SQL** 裁剪，减少数据库往返
+- 出站请求统一 URL 清洗（剥 Markdown 包络字符、去掉误粘的 action 路径）+ 白名单校验（禁 localhost / 内网 / 链路本地地址），媒体与天气请求均受保护
+- 全局异常统一中文文案：参数不合法 / 上传超 25MB（413）/ 类型不符（400）、并发写入冲突（503，自动重试一次）
+- 异步任务查询做 kind ↔ profileType 归属校验，防止越权读取其它 Profile 的任务；taskId 仅接受 `[0-9a-zA-Z_-]`
+- 媒体接口未配置模型时返回 HTTP 200 + `status=degraded` + 中文提示，不中断对话
+- `SchemaMigrator` 启动时幂等补列/补索引（task 软删列、chat_message 索引、api_profile 枚举改 VARCHAR 等），老库升级无需手动改表
+
+**3. 文档修订**
+
+- 修正「表结构 / 接口一览」与代码不一致处：`api_profile` 字段名（`model_name`→`model`、删除不存在的 `api_host`）、补 `system_config` 表、补多模态与知识库检索等端点
 
 ---
