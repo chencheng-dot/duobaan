@@ -25,11 +25,10 @@ public class KnowledgeChunk {
     @Column(name = "kb_id", nullable = false)
     private Long kbId;
 
-    @Lob
+    // 只保留显式 columnDefinition（列已是 MEDIUMTEXT），按 P2-6 口径去掉语义重复的 @Lob
     @Column(nullable = false, columnDefinition = "MEDIUMTEXT")
     private String content;
 
-    @Lob
     @Column(columnDefinition = "MEDIUMTEXT")
     private String embedding;
 

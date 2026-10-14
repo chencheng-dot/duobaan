@@ -14,8 +14,6 @@ import org.springframework.stereotype.Repository;
 @Repository
 public interface ChatMessageRepository extends JpaRepository<ChatMessage, Long> {
 
-    List<ChatMessage> findByModeOrderByCreatedAtAsc(ChatMode mode);
-
     /** 取最近 limit 条（按时间倒序取 top N，调用方再反转成正序渲染） */
     List<ChatMessage> findByModeOrderByCreatedAtDescIdDesc(ChatMode mode, Pageable pageable);
 

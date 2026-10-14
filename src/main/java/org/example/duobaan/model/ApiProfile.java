@@ -47,7 +47,8 @@ public class ApiProfile {
     @Column(length = 100)
     private String model;
 
-    @Lob
+    // 只保留显式 columnDefinition（列本身已是 MEDIUMTEXT）：@Lob 会让 Hibernate 按 CLOB 流式绑定，
+    // 与列类型两套推导打架，故按 P2-6 口径统一去掉（与 ChatMessage.content 同处理）。
     @Column(name = "api_key", nullable = false, columnDefinition = "MEDIUMTEXT")
     private String apiKey;
 

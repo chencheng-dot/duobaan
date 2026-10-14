@@ -4,7 +4,6 @@ import java.util.List;
 
 import org.example.duobaan.model.Task;
 import org.example.duobaan.model.TaskGroup;
-import org.example.duobaan.model.TaskStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -21,8 +20,6 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
             + "AND t.status NOT IN (org.example.duobaan.model.TaskStatus.DONE, org.example.duobaan.model.TaskStatus.SUBMITTED) "
             + "ORDER BY t.createdAt ASC")
     List<Task> findActiveByGroup(@Param("group") TaskGroup group);
-
-    long countByGroupAndStatus(TaskGroup group, TaskStatus status);
 
     /**
      * 零点转组：把所有「明日」任务原子地改为「今日」，返回受影响行数。

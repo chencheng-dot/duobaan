@@ -18,7 +18,6 @@ public class SystemConfig {
     @Column(name = "cfg_key", nullable = false, length = 100)
     private String key;
 
-    @Lob
     @Column(name = "cfg_value", nullable = false, columnDefinition = "MEDIUMTEXT")
     private String value;
 

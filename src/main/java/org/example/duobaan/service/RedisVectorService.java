@@ -60,22 +60,6 @@ public class RedisVectorService {
         }
     }
 
-    /** 读取一个分块的向量 */
-    public float[] getVector(Long chunkId) {
-        if (chunkId == null) {
-            return null;
-        }
-        try (Jedis jedis = jedisPool.getResource()) {
-            String json = jedis.get(vecKey(chunkId));
-            if (json == null || json.isBlank()) {
-                return null;
-            }
-            return objectMapper.readValue(json, float[].class);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
     /** 取某知识库下所有分块的 chunkId */
     public List<Long> getChunkIds(Long kbId) {
         if (kbId == null) {
@@ -95,21 +79,6 @@ public class RedisVectorService {
             return ids;
         } catch (Exception e) {
             return List.of();
-        }
-    }
-
-    /** 删除某个分块的向量（同时从知识库集合移除） */
-    public void deleteVector(Long kbId, Long chunkId) {
-        if (chunkId == null) {
-            return;
-        }
-        try (Jedis jedis = jedisPool.getResource()) {
-            jedis.del(vecKey(chunkId));
-            if (kbId != null) {
-                jedis.srem(chunksKey(kbId), String.valueOf(chunkId));
-            }
-        } catch (Exception e) {
-            log.warn("删除分块 {} 的 Redis 向量失败：{}", chunkId, e.getMessage());
         }
     }
 
