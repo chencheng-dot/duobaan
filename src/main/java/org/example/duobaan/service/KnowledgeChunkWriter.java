@@ -48,6 +48,9 @@ public class KnowledgeChunkWriter {
     /**
      * 写入一个文档：分块 → 向量化 → 分块存 MySQL → 向量存 Redis。
      * 整个过程在一个事务里：任何一步抛异常都整体回滚，不会留下半成品分块。
+     *
+     * <p>返回真实写入的向量数：向量化全部失败时 {@code embeddingReady=false} 并带降级说明，
+     * 不再出现「接口成功、检索永远为空」的静默失败。
      */
     @Transactional
     public KbAddResult addDocument(Long kbId, String text) {
@@ -57,14 +60,17 @@ public class KnowledgeChunkWriter {
                 kb.getChunkSize() == null ? 500 : kb.getChunkSize(),
                 kb.getChunkOverlap() == null ? 50 : kb.getChunkOverlap());
         if (chunks.isEmpty()) {
-            return new KbAddResult(0, embeddingService.isReady());
+            return new KbAddResult(0, 0, embeddingService.isReady(),
+                    "内容为空或分块结果为空，未写入任何分块。");
         }
-        List<float[]> vectors = embeddingService.isReady()
+        boolean embeddingReady = embeddingService.isReady();
+        List<float[]> vectors = embeddingReady
                 ? embeddingService.embed(chunks)
                 : List.of();
 
         int startIndex = (int) chunkRepo.countByKbId(kbId);
         int saved = 0;
+        int vectorized = 0;
         for (int i = 0; i < chunks.size(); i++) {
             String c = chunks.get(i);
             if (c.isBlank()) {
@@ -80,11 +86,49 @@ public class KnowledgeChunkWriter {
             KnowledgeChunk savedChunk = chunkRepo.save(kc);
 
             float[] v = (vectors != null && vectors.size() > i) ? vectors.get(i) : null;
-            if (v != null) {
-                redisVectorService.storeVector(kbId, savedChunk.getId(), v);
+            // storeVector 返回真实写入结果：Redis 写失败也算「未向量化」，不能再计入成功
+            if (v != null && redisVectorService.storeVector(kbId, savedChunk.getId(), v)) {
+                vectorized++;
             }
             saved++;
         }
-        return new KbAddResult(saved, embeddingService.isReady());
+        // 语义：没有分块时保持「配置是否就绪」；有分块时只有全部向量化成功才算就绪
+        boolean ready = saved == 0
+                ? embeddingService.isReady()
+                : (embeddingReady && vectorized == saved);
+        return new KbAddResult(saved, vectorized, ready,
+                buildHint(saved, vectorized, embeddingReady, embeddingService.failureSuffix()));
+    }
+
+    /**
+     * 生成入库结果的降级说明（包级可见，便于不启动 Spring 的单元测试）。
+     *
+     * @param saved          本次写入的分块数
+     * @param vectorized     本次成功写入的向量数
+     * @param embeddingReady 是否配置了向量化模型
+     * @param failureSuffix  {@link EmbeddingService#failureSuffix()} 的结果
+     * @return 需要展示的说明；全部正常时为 {@code null}
+     */
+    static String buildHint(int saved, int vectorized, boolean embeddingReady, String failureSuffix) {
+        if (saved <= 0) {
+            return null;
+        }
+        if (!embeddingReady) {
+            return "分块已入库，但尚未配置向量化模型，检索暂不可用："
+                    + "请到「设置 → 向量化模型」配置独立的 Base URL / Key / 模型后，点「重建向量」。";
+        }
+        if (vectorized <= 0) {
+            return "分块已入库，但向量化全部失败，检索暂不可用；"
+                    + safeSuffix(failureSuffix) + " 请修复后点「重建向量」。";
+        }
+        if (vectorized < saved) {
+            return "仅 " + vectorized + "/" + saved + " 个分块向量化成功，其余分块暂不可检索；"
+                    + safeSuffix(failureSuffix);
+        }
+        return null;
+    }
+
+    private static String safeSuffix(String failureSuffix) {
+        return (failureSuffix == null || failureSuffix.isBlank()) ? "" : failureSuffix;
     }
 }

@@ -46,17 +46,43 @@ public class RedisVectorService {
         return "kb:vec:" + chunkId;
     }
 
-    /** 写入一个分块的向量，并把 chunkId 登记到知识库的 chunk 集合 */
-    public void storeVector(Long kbId, Long chunkId, float[] vector) {
+    /**
+     * 写入一个分块的向量，并把 chunkId 登记到知识库的 chunk 集合。
+     *
+     * @return 是否真正写入成功。失败时不抛异常（不阻断入库主流程），但必须让调用方
+     *         能统计到「实际写入数」——旧实现完全静默，导致 0 个向量写入被当成成功。
+     */
+    public boolean storeVector(Long kbId, Long chunkId, float[] vector) {
         if (kbId == null || chunkId == null || vector == null) {
-            return;
+            return false;
         }
         try (Jedis jedis = jedisPool.getResource()) {
             String json = objectMapper.writeValueAsString(vector);
             jedis.set(vecKey(chunkId), json);
             jedis.sadd(chunksKey(kbId), String.valueOf(chunkId));
+            return true;
         } catch (Exception e) {
-            // Redis 写入失败不阻断入库流程（分块文本已在 MySQL，向量缺失仅影响检索）
+            // Redis 写入失败不阻断入库流程（分块文本已在 MySQL），但必须留痕便于排查
+            log.warn("写入向量失败（kbId={}, chunkId={}）：{}", kbId, chunkId, e.toString(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 统计某知识库「已登记」的分块向量数（SCARD）。
+     *
+     * <p>以 chunk 集合成员为准，不再逐个校验向量键是否存在——用于状态页快速判断
+     * 「分块数与向量数是否匹配」；残留孤儿成员会被计入，需要「重建向量」清理。
+     */
+    public long countVectorsByKb(Long kbId) {
+        if (kbId == null) {
+            return 0;
+        }
+        try (Jedis jedis = jedisPool.getResource()) {
+            return jedis.scard(chunksKey(kbId));
+        } catch (Exception e) {
+            log.warn("统计知识库 {} 的已登记向量数失败：{}", kbId, e.toString(), e);
+            return 0;
         }
     }
 

@@ -1,5 +1,6 @@
 package org.example.duobaan.service;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -7,6 +8,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 import org.example.duobaan.model.KnowledgeBase;
@@ -14,7 +17,9 @@ import org.example.duobaan.model.KnowledgeChunk;
 import org.example.duobaan.model.dto.ChunkDTO;
 import org.example.duobaan.model.dto.KbAddResult;
 import org.example.duobaan.model.dto.KbDTO;
+import org.example.duobaan.model.dto.RagStatus;
 import org.example.duobaan.model.dto.RetrievedChunk;
+import org.example.duobaan.model.dto.SearchExplain;
 import org.example.duobaan.repository.KnowledgeBaseRepository;
 import org.example.duobaan.repository.KnowledgeChunkRepository;
 import org.slf4j.Logger;
@@ -47,14 +52,29 @@ public class KnowledgeService {
     private static final int TOP_K = 4;
     /** 余弦相似度阈值，低于该值视为无关，不注入 LLM */
     private static final double MIN_SCORE = 0.35;
-    /** 单个知识库文档体积上限（10MB）：multipart 全局上限之外再自查一道，避免整体读进内存 */
-    private static final long MAX_DOC_BYTES = 10L * 1024 * 1024;
+    /**
+     * 单个知识库文档体积上限（10MB）：multipart 全局上限之外再自查一道，避免整体读进内存。
+     * 控制器复用同一常量做入口校验，避免「接口层一套阈值、服务层另一套阈值」两处漂移
+     * （曾出现把检索词上限 2000 字符误用于文档正文，导致正常长文被 400 拒绝的缺陷）。
+     */
+    public static final long MAX_DOC_BYTES = 10L * 1024 * 1024;
+    /**
+     * 单次「重建向量」允许的最大分块数。
+     * 重建采用「先全部算完、再统一落盘」的两阶段方式（避免先清后失败把索引清空），
+     * 全部向量会短暂驻留内存，因此必须有上界，超过时要求分批处理。
+     */
+    static final int MAX_REVECTORIZE_CHUNKS = 20_000;
+    /** 重建向量分批大小（单次 embedding 请求最多多少段文本） */
+    private static final int REVECTORIZE_BATCH_SIZE = 16;
 
     private final KnowledgeBaseRepository kbRepo;
     private final KnowledgeChunkRepository chunkRepo;
     private final EmbeddingService embeddingService;
     private final RedisVectorService redisVectorService;
     private final KnowledgeChunkWriter chunkWriter;
+
+    /** 按知识库维度的重建锁：同一知识库的并发「重建向量」串行化，避免互相覆盖索引 */
+    private final ConcurrentHashMap<Long, ReentrantLock> revectorizeLocks = new ConcurrentHashMap<>();
 
     public KnowledgeService(KnowledgeBaseRepository kbRepo,
                             KnowledgeChunkRepository chunkRepo,
@@ -120,8 +140,19 @@ public class KnowledgeService {
      * 写入文档：对外签名（参数与返回类型 KbAddResult）保持不变，内部薄委托给独立 bean。
      * 事务边界在 KnowledgeChunkWriter.addDocument 上：跨 bean 调用经过代理，事务才真正生效；
      * 原来的 this.addDocument(...) 自调用不开启事务，正是「半成品分块」的根因。
+     *
+     * <p>入参在进入 writer 之前先校验：空内容直接 400，超限直接 413，
+     * 避免「空文档也走一遍 embedding 调用」与「超大文本被整体读进内存」（fail-fast）。
      */
     public KbAddResult addDocument(Long kbId, String text) {
+        if (text == null || text.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "文档内容不能为空");
+        }
+        long bytes = text.getBytes(StandardCharsets.UTF_8).length;
+        if (bytes > MAX_DOC_BYTES) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,
+                    "文档内容过大（上限 10MB），当前约 " + (bytes / 1024) + " KB");
+        }
         return chunkWriter.addDocument(kbId, text);
     }
 
@@ -168,63 +199,189 @@ public class KnowledgeService {
     }
 
     /**
-     * 对已有分块重新向量化：清掉 Redis 里该知识库的旧向量，重新调 embedding 接口写入。
-     * 用于：上传时未配置 embedding、或换了 embedding 模型后需要重建向量的场景。
-     * 返回成功向量化的分块数。
+     * 对已有分块重新向量化：把全部分块的向量重算一遍后整体替换 Redis 里的旧索引。
+     * 用于：上传时未配置 embedding、换了 embedding 模型、或 Redis 丢过数据的场景。
+     *
+     * <p>为什么是「两阶段」而不是「先清后算」：旧实现先 deleteVectorsByKb 再逐批调用
+     * embedding，一旦额度耗尽（4xx），旧索引已经被清空、新索引又写不进去，
+     * 结果是「点一次重建 = 把能用的索引也弄没了」。现在先把所有向量算完并校验完整，
+     * 任何一批缺失都在动旧数据之前失败并保留原索引。
+     *
+     * <p>并发：同一知识库的重建用分段锁串行化（不同知识库互不影响），
+     * 避免两个请求交错删除/写入产生半套索引。
+     *
+     * @return 实际写入的分块数；只有「全部分块都成功写入」才会返回，
+     *         零写入不再被当作成功（历史缺陷：返回 0 且 HTTP 200，前端显示成功）
      */
     public int revectorize(Long kbId) {
         findOrThrow(kbId);
         if (!embeddingService.isReady()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "向量化模型未就绪，请先在「设置 → 向量化模型」配置 embedding。");
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "向量化模型未就绪，请先在「设置 → 向量化模型」配置 embedding。");
         }
-        List<KnowledgeChunk> chunks = chunkRepo.findByKbIdOrderByChunkIndexAsc(kbId);
-        if (chunks.isEmpty()) {
-            return 0;
+        ReentrantLock lock = revectorizeLocks.computeIfAbsent(kbId, k -> new ReentrantLock());
+        if (!lock.tryLock()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "该知识库正在重建向量，请等待当前任务完成后再试。");
         }
-        // 先清旧向量
-        redisVectorService.deleteVectorsByKb(kbId);
+        try {
+            List<KnowledgeChunk> chunks = chunkRepo.findByKbIdOrderByChunkIndexAsc(kbId);
+            if (chunks.isEmpty()) {
+                return 0;
+            }
+            if (chunks.size() > MAX_REVECTORIZE_CHUNKS) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "分块数过多（" + chunks.size() + "），单次重建上限 " + MAX_REVECTORIZE_CHUNKS
+                                + "，请先减少分块（如清空后分批重新入库）。");
+            }
 
-        // 分批向量化（每批 16 条，避免单次请求过大）
-        int done = 0;
-        int batchSize = 16;
-        for (int start = 0; start < chunks.size(); start += batchSize) {
-            int end = Math.min(start + batchSize, chunks.size());
-            List<KnowledgeChunk> batch = chunks.subList(start, end);
-            List<String> texts = batch.stream().map(KnowledgeChunk::getContent).toList();
-            List<float[]> vectors = embeddingService.embed(texts);
-            for (int i = 0; i < batch.size(); i++) {
-                float[] v = (vectors != null && vectors.size() > i) ? vectors.get(i) : null;
-                if (v != null) {
-                    redisVectorService.storeVector(kbId, batch.get(i).getId(), v);
+            // 第一阶段：全部分块重算向量（不改动任何已有数据）
+            List<float[]> vectors = new ArrayList<>(chunks.size());
+            int missing = 0;
+            for (int start = 0; start < chunks.size(); start += REVECTORIZE_BATCH_SIZE) {
+                int end = Math.min(start + REVECTORIZE_BATCH_SIZE, chunks.size());
+                List<String> texts = chunks.subList(start, end).stream().map(KnowledgeChunk::getContent).toList();
+                List<float[]> batch = embeddingService.embed(texts);
+                for (int i = 0; i < end - start; i++) {
+                    float[] v = (batch != null && batch.size() > i) ? batch.get(i) : null;
+                    if (v == null) {
+                        missing++;
+                    }
+                    vectors.add(v);
+                }
+            }
+            if (missing > 0) {
+                // 不动旧索引：避免「重建失败 + 旧索引被清空」的双重损失
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "向量化未完成（" + missing + "/" + chunks.size() + " 个分块失败），"
+                                + "已保留原有索引；" + embeddingService.failureSuffix());
+            }
+
+            // 第二阶段：整体替换（先算后写，写失败时旧索引会被清掉的部分才可感知）
+            redisVectorService.deleteVectorsByKb(kbId);
+            int done = 0;
+            for (int i = 0; i < chunks.size(); i++) {
+                if (redisVectorService.storeVector(kbId, chunks.get(i).getId(), vectors.get(i))) {
                     done++;
                 }
             }
+            if (done == 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "向量写入失败（0/" + chunks.size() + "），Redis 可能不可用；请检查 Redis 后重试。");
+            }
+            if (done < chunks.size()) {
+                log.warn("知识库 {} 重建向量部分失败：{}/{}", kbId, done, chunks.size());
+            }
+            return done;
+        } finally {
+            lock.unlock();
         }
-        return done;
+    }
+
+    // ====================== 状态自检 ======================
+
+    /**
+     * 知识库整体状态自检：分块数与向量数逐一比对，把「配置正常但索引为空」显式暴露为降级。
+     *
+     * <p>背景：线上曾出现「状态显示就绪、检索永远返回空、界面无任何提示」的静默失效。
+     * 向量数量以 Redis 登记集合（SCARD）为准，是近似值：残留孤儿成员会被计入，需要「重建向量」清理。
+     */
+    public RagStatus status() {
+        boolean embeddingReady = embeddingService.isReady();
+        // 单独探测一次 Redis：countVectorsByKb 吞掉异常后返回 0，不探测就无法区分
+        // 「Redis 连不上」与「Redis 连得上但确实没有数据」，只能给出误导性的排查提示
+        boolean redisOk = redisVectorService.ping();
+        int kbCount = 0;
+        long chunkCount = 0;
+        long vectorCount = 0;
+        try {
+            List<KnowledgeBase> bases = kbRepo.findAllByOrderByCreatedAtDesc();
+            kbCount = bases.size();
+            for (KnowledgeBase kb : bases) {
+                chunkCount += chunkRepo.countByKbId(kb.getId());
+                // Redis 已判定不可用时不再逐库统计，避免每个知识库都刷一条 warn 日志
+                if (redisOk) {
+                    vectorCount += redisVectorService.countVectorsByKb(kb.getId());
+                }
+            }
+        } catch (Exception e) {
+            // 数据库不可用时状态接口本身不能 500：返回可读的降级说明
+            log.warn("知识库状态自检失败：{}", e.toString(), e);
+            return new RagStatus(embeddingReady, redisOk, kbCount, chunkCount, vectorCount, true,
+                    "知识库状态检查失败（数据库不可访问），知识检索暂不可用，请检查数据库服务。");
+        }
+        String hint = hintFor(embeddingReady, redisOk, chunkCount, vectorCount);
+        return new RagStatus(embeddingReady, redisOk, kbCount, chunkCount, vectorCount, hint != null, hint);
+    }
+
+    /**
+     * 生成状态页的降级说明（包级可见，便于不启动 Spring 的单元测试直接断言）。
+     *
+     * <p>判定顺序即排查顺序：Redis 是否连得上 → 有没有内容 → 向量化是否配置 → 向量是否齐全。
+     * 顺序不能颠倒：Redis 不通时 vectorCount 恒为 0，若先判 vectorCount 就会把
+     * 「Redis 没启动」误报成「向量丢了，请重建」，把用户引向错误的修复动作。
+     *
+     * @return 需要展示的说明；完全就绪时返回 {@code null}
+     */
+    static String hintFor(boolean embeddingReady, boolean redisOk, long chunkCount, long vectorCount) {
+        if (!redisOk) {
+            return "Redis 未连通，知识检索暂不可用（读不到任何向量索引）。"
+                    + "请先启动本地 Redis（默认 localhost:6379）后刷新状态。";
+        }
+        if (chunkCount == 0) {
+            return null;
+        }
+        if (!embeddingReady) {
+            return "已有 " + chunkCount + " 个分块，但向量化模型未就绪，知识检索暂不可用。"
+                    + "请到「设置 → 向量化模型」配置 Base URL / Key / 模型后点「重建向量」。";
+        }
+        if (vectorCount == 0) {
+            return "已有 " + chunkCount + " 个分块，但 Redis 中一个向量都没有（入库时向量化失败或 Redis 丢过数据）。"
+                    + "请修复向量化配置后点「重建向量」。";
+        }
+        if (vectorCount < chunkCount) {
+            return "已有 " + chunkCount + " 个分块，但 Redis 中只有 " + vectorCount + " 个向量，"
+                    + "缺失 " + (chunkCount - vectorCount) + " 个，检索会漏掉这些分块。"
+                    + "请检查 Redis 持久化后点「重建向量」补齐。";
+        }
+        return null;
+    }
+
+    /** 包级可见：便于不启动 Spring 的单元测试直接断言降级判定；口径须与 {@link #hintFor} 一致 */
+    static boolean degraded(RagStatus status) {
+        return !status.redisOk()
+                || (status.chunkCount() > 0
+                    && (!status.embeddingReady() || status.vectorCount() < status.chunkCount()));
     }
 
     // ====================== 检索 ======================
 
-    /**
-     * 检索：向量化 query 后，从 Redis 取所有知识库的分块向量，算余弦相似度，
-     * 取 top-K 且得分 ≥ 阈值的分块。向量化不可用时返回空列表。
-     */
+    /** 检索并只返回召回内容；失败/未就绪/无命中均返回空列表，调用方无需区分原因 */
     public List<RetrievedChunk> search(String query, int topK) {
+        return searchExplain(query, topK).chunks();
+    }
+
+    /**
+     * 检索并返回「为什么是这些结果」：把「查询为空」「向量化未就绪」「向量化失败」
+     * 「索引为空」「无命中」「向量与正文不一致」区分开，不再让六种完全不同的原因
+     * 都表现为一个空列表。
+     */
+    public SearchExplain searchExplain(String query, int topK) {
         if (query == null || query.isBlank()) {
-            return List.of();
+            return new SearchExplain(SearchExplain.Reason.BLANK_QUERY, "检索内容为空，未执行知识检索。", List.of());
         }
-        int n = Math.max(1, Math.min(topK, TOP_K));
+        if (!embeddingService.isReady()) {
+            return new SearchExplain(SearchExplain.Reason.EMBEDDING_NOT_READY,
+                    "向量化模型未配置或不可用，知识检索暂不可用。请到「设置 → 向量化模型」完成配置后点「重建向量」。",
+                    List.of());
+        }
         float[] qv = embeddingService.embedOne(query.trim());
         if (qv == null) {
-            return List.of();
+            return new SearchExplain(SearchExplain.Reason.EMBEDDING_FAILED,
+                    "查询向量化失败" + embeddingService.failureSuffix() + "，知识检索暂不可用。", List.of());
         }
 
         List<Long> kbIds = new ArrayList<>(redisVectorService.getAllKbIds());
-        if (kbIds.isEmpty()) {
-            return List.of();
-        }
-
-        // chunkId → kbId 只建一次映射（避免对同一 kb 重复调用 getChunkIds）
         Map<Long, Long> chunkToKb = new HashMap<>();
         List<Long> allChunkIds = new ArrayList<>();
         for (Long kbId : kbIds) {
@@ -235,7 +392,9 @@ public class KnowledgeService {
             }
         }
         if (allChunkIds.isEmpty()) {
-            return List.of();
+            return new SearchExplain(SearchExplain.Reason.INDEX_EMPTY,
+                    "知识库中还没有任何向量索引（尚未入库，或入库时向量化失败 / Redis 丢过数据），请先上传内容或点「重建向量」。",
+                    List.of());
         }
 
         // 批量取向量（单次 mget）
@@ -249,11 +408,14 @@ public class KnowledgeService {
                 ranked.add(new Scored(allChunkIds.get(i), s));
             }
         }
-        ranked.sort(Comparator.comparingDouble(Scored::score).reversed());
-        List<Scored> top = ranked.stream().limit(n).toList();
-        if (top.isEmpty()) {
-            return List.of();
+        if (ranked.isEmpty()) {
+            return new SearchExplain(SearchExplain.Reason.NO_HIT,
+                    "已扫描 " + allChunkIds.size() + " 个分块，没有与问题足够相关的内容（相似度阈值 " + MIN_SCORE + "）。",
+                    List.of());
         }
+        ranked.sort(Comparator.comparingDouble(Scored::score).reversed());
+        int n = Math.max(1, Math.min(topK, TOP_K));
+        List<Scored> top = ranked.stream().limit(n).toList();
         List<Long> topIds = top.stream().map(Scored::id).toList();
 
         // 只对 top-N 查正文
@@ -285,7 +447,11 @@ public class KnowledgeService {
             out.add(new RetrievedChunk(kbId, kbNames.getOrDefault(kbId, "知识库"),
                     cid, content, scoreById.getOrDefault(cid, 0.0)));
         }
-        return out;
+        if (out.isEmpty()) {
+            return new SearchExplain(SearchExplain.Reason.INDEX_INCONSISTENT,
+                    "检索命中了向量，但对应分块正文已不存在（数据不一致），建议点「重建向量」修复索引。", out);
+        }
+        return new SearchExplain(SearchExplain.Reason.OK, null, out);
     }
 
     /**

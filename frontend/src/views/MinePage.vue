@@ -96,8 +96,10 @@ const newKbChunkSize = ref(500)
 const newKbChunkOverlap = ref(50)
 const kbCreating = ref(false)
 
-// RAG 运行状态
-const ragStatus = ref({ embeddingReady: false, redisOk: false, hint: '' })
+// RAG 运行状态（degraded=true 表示「配置在、但检索不可用/不完整」，例如分块 935 个而向量 0 个）
+const ragStatus = ref({
+  embeddingReady: false, redisOk: false, kbCount: 0, chunkCount: 0, vectorCount: 0, degraded: false, hint: ''
+})
 
 // 展开的知识库 + 文档录入 / 分块
 const expandedKb = ref(null)
@@ -125,12 +127,15 @@ async function loadKbData() {
   try {
     const [kbList, status] = await Promise.all([
       listKbs().catch(() => []),
-      getKnowledgeStatus().catch(() => ({ embeddingReady: false, redisOk: false, hint: '' }))
+      getKnowledgeStatus().catch(() => ({
+        embeddingReady: false, redisOk: false, degraded: true, hint: '知识库状态检查失败，请确认后端服务与 Redis 正在运行。'
+      }))
     ])
     kbs.value = kbList
     ragStatus.value = status
-    if (!status.embeddingReady || !status.redisOk) {
-      kbWarn.value = status.hint
+    // 以服务端 degraded 为准：只看 embeddingReady 会漏掉「配置在、向量却没写进去」的静默失效
+    if (status.degraded) {
+      kbWarn.value = status.hint || '知识库检索降级：请检查向量化配置与 Redis 数据。'
     }
   } catch (e) { /* ignore */ }
 }
@@ -213,8 +218,11 @@ async function addDocumentText(kb) {
   try {
     const res = await addKbDocument(kb.id, text)
     if (res.chunkCount) docText.value = ''
-    if (!res.embeddingReady) {
-      kbWarn.value = '分块已入库但向量化未就绪，检索暂不可用：请到「设置 → 向量化模型」配置独立的 embedding（Base URL + Key + 模型），并确保本地 Redis 已启动。'
+    // 后端返回真实写入的向量数与降级说明：0 向量时不能再显示「成功」
+    if (res.hint) {
+      kbWarn.value = res.hint
+    } else if (res.embeddingReady === false) {
+      kbWarn.value = '分块已入库但向量化未就绪，检索暂不可用：请到「设置 → 向量化模型」配置独立的 embedding（Base URL + Key + 模型）后点「重建向量」。'
     }
     await Promise.all([loadKbs(), loadChunks(kb.id)])
   } catch (e) {
@@ -231,8 +239,11 @@ async function uploadFile(kb, e) {
   try {
     const res = await uploadKbDocument(kb.id, f)
     if (res.chunkCount) docText.value = ''
-    if (!res.embeddingReady) {
-      kbWarn.value = '文件已入库但向量化未就绪，检索暂不可用：请激活大模型并填写 embedding 模型 ID。'
+    // 与文本入库一致：以后端返回的真实向量数与 hint 为准
+    if (res.hint) {
+      kbWarn.value = res.hint
+    } else if (res.embeddingReady === false) {
+      kbWarn.value = '文件已入库但向量化未就绪，检索暂不可用：请到「设置 → 向量化模型」配置后点「重建向量」。'
     }
     await Promise.all([loadKbs(), loadChunks(kb.id)])
   } catch (err) {
@@ -262,7 +273,12 @@ async function doRevectorize(kb) {
   revectorizing.value = true
   try {
     const n = await revectorizeKb(kb.id)
-    kbWarn.value = `已对「${kb.name}」的 ${n} 个分块重新向量化，现在可以在对话中检索到了。`
+    if (n === 0) {
+      // 后端已保证 0 写入不再返回 200；这里仍兜底，避免极端情况下显示「成功」
+      kbError.value = '重建向量没有写入任何数据（0 个），请检查向量化配置与 Redis 后重试。'
+    } else {
+      kbWarn.value = `已对「${kb.name}」的 ${n} 个分块重新向量化，现在可以在对话中检索到了。`
+    }
     await loadKbs()
   } catch (e) {
     kbError.value = '向量化失败：' + e.message
