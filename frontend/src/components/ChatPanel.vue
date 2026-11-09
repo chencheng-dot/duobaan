@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import {
   chatStream,
   parseTasks,
@@ -9,7 +9,9 @@ import {
   generateSpeech,
   transcribeAudio,
   generateVideo,
-  pollTask
+  pollTask,
+  getModelsOverview,
+  activateApiProfile
 } from '../api'
 
 const props = defineProps({
@@ -20,26 +22,116 @@ const props = defineProps({
 
 const emit = defineEmits(['tasks-created'])
 
-// ================= 模态选择器 =================
+// ================= 模型选择器 =================
 /**
- * AUTO:    智能模式（输入文字 → 先用文本模型判断/答复；若用户描述是"生图/视频/TTS/ASR"，仍可手动切 Tab）
- * TEXT:    纯文本对话（chatStream）
- * IMAGE:   文生图
- * ASR:     语音转写（上传文件）
- * TTS:     文生语音（把输入框文字转成音频播放）
- * VIDEO:   文生视频
+ * 聊天页顶部只有一个「模型」下拉，列出设置页里所有 AI 模型（按能力分组）。
+ * 点选某个模型 = 把它设为该能力的默认（后端 activate 接口，同类只保留一个默认）。
+ *
+ * 发送时按内容自动路由（避免用户先手动切 Tab 再说话）：
+ *   「画一只猫」      → 图片模型
+ *   「生成一段视频」  → 视频模型
+ *   「朗读这段话」    → 语音模型
+ *   其余              → 文本模型
+ * 该能力一个模型都没配时，前端直接回「你还没有「X模型」哦」，不浪费一次网络请求；
+ * 配置了但 Key 失效等系统性问题仍交给后端返回的友好文案。
  */
-const MODES = [
-  { key: 'AUTO',  label: '智能', symbol: '◎', hint: '默认用文本模型对话，有特殊需求请切到对应 Tab' },
-  { key: 'TEXT',  label: '文本', symbol: 'A', hint: '纯文本大模型流式问答' },
-  { key: 'IMAGE', label: '图片', symbol: '🖼', hint: '文生图（尺寸默认 1024×1024）' },
-  { key: 'ASR',   label: '转写', symbol: '🎙', hint: '上传音频 → 自动转文字' },
-  { key: 'TTS',   label: '朗读', symbol: '🔊', hint: '把输入框文字朗读为语音' },
-  { key: 'VIDEO', label: '视频', symbol: '🎬', hint: '文生视频（默认 5s / 16:9）' }
+const CAP_ORDER = [
+  { type: 'LLM',       key: 'cap-text',      label: '文本' },
+  { type: 'IMAGE',     key: 'cap-image',     label: '图片' },
+  { type: 'AUDIO',     key: 'cap-audio',     label: '语音' },
+  { type: 'VIDEO',     key: 'cap-video',     label: '视频' },
+  { type: 'EMBEDDING', key: 'cap-embedding', label: '向量化' }
 ]
+
+const models = ref([])           // 全量 AI 模型（apiKey 已打码）
+const modelMenuOpen = ref(false)
+// 只有「转写」需要显式切换（要先选文件）；其余场景一律 AUTO 自动路由。
 const mediaMode = ref('AUTO')
 const asrFile = ref(null)
 const asrFileName = ref('')
+
+/** 顶部下拉当前展示的文本模型名（没有则提示未配置） */
+const currentModelLabel = computed(() => {
+  const active = models.value.find((m) => m.profileType === 'LLM' && m.isActive)
+  if (active) return active.name || active.model || '文本模型'
+  return '未配置文本模型'
+})
+
+/** 按能力分组，空组也保留（让用户看到「这一类还没配」） */
+const modelGroups = computed(() =>
+  CAP_ORDER.map((c) => ({
+    ...c,
+    items: models.value.filter((m) => m.profileType === c.type)
+  }))
+)
+
+/** 拉模型列表；失败不阻塞聊天（下拉显示未配置，发送时后端仍会给友好提示） */
+async function loadModels() {
+  try {
+    const res = await getModelsOverview()
+    models.value = Array.isArray(res?.ai) ? res.ai : []
+  } catch (e) {
+    console.warn('[ChatPanel] 加载模型列表失败：', e.message)
+    models.value = []
+  }
+}
+
+/** 点选下拉里的模型 → 设为该能力默认 */
+async function selectModel(m) {
+  modelMenuOpen.value = false
+  if (!m || m.isActive) return
+  try {
+    await activateApiProfile(m.id)
+    await loadModels()
+  } catch (e) {
+    console.warn('[ChatPanel] 切换默认模型失败：', e.message)
+  }
+}
+
+function hasCapability(type) {
+  return models.value.some((m) => m.profileType === type)
+}
+
+/** 该能力有模型但没有默认的，顺手激活第一条（后端同类只保留一个 active） */
+async function ensureActive(type) {
+  const list = models.value.filter((m) => m.profileType === type)
+  if (!list.length) return false
+  if (list.some((m) => m.isActive)) return true
+  try {
+    await activateApiProfile(list[0].id)
+    await loadModels()
+    return true
+  } catch (e) {
+    console.warn('[ChatPanel] 激活模型失败：', e.message)
+    return false
+  }
+}
+
+/**
+ * 意图识别：只认明确的动作描述，避免「视频脚本」「海报文案」这类写作需求被误判。
+ * 顺序：先排除文案类 → 视频 → 图片 → 朗读 → 文本。
+ */
+function detectIntent(text) {
+  const t = text.trim()
+  if (/(脚本|文案|方案|大纲|字幕稿|提示词)/.test(t)) return 'TEXT'
+  if (/(生成|制作|做|拍|来).{0,8}(视频|短片|动画)|视频.{0,6}(生成|制作)/.test(t)) return 'VIDEO'
+  if (/(画|绘制|生成|制作|做|来).{0,8}(图|插画|海报|壁纸|头像|logo)|来(一)?张图|^请?(帮我)?画(?!风|面|质|法|笔)/.test(t)) return 'IMAGE'
+  if (/^(朗读|念一下|读一下|读一遍|帮我读|用语音说)/.test(t)) return 'TTS'
+  return 'TEXT'
+}
+
+/** 缺模型时的统一回复（与后端 MediaService/LlmGatewayService 文案同款） */
+function pushMissingHint(intent, text) {
+  const label = { IMAGE: '图片', VIDEO: '视频', TTS: '语音' }[intent] || '对应'
+  messages.value.push({ id: nextMsgId(), role: 'user', content: text })
+  input.value = ''
+  messages.value.push({
+    id: nextMsgId(),
+    role: 'assistant',
+    content: `你还没有「${label}模型」哦～ 去「设置 → AI 模型」添加一个${label}模型，就能用了。`
+  })
+  scrollToBottom()
+}
 
 // ================= 消息 / 对话状态 =================
 const messages = ref([])
@@ -81,6 +173,8 @@ function parseContent(raw) {
 
 /** 组件挂载时拉最近 50 条历史，恢复上一次对话 — 刷新页面不再空 */
 onMounted(async () => {
+  // 模型列表与历史并行拉：模型拉不到不阻塞聊天（发送时后端仍会兜底提示）
+  loadModels()
   try {
     const list = await getChatHistory(props.mode, 50)
     if (Array.isArray(list) && list.length) {
@@ -156,21 +250,23 @@ onBeforeUnmount(() => {
 })
 
 // ================= 统一发送入口 =================
-function sendText() {
+async function sendText() {
   const text = input.value.trim()
   if (!text || loading.value) return
-  switch (mediaMode.value) {
-    case 'AUTO':
-    case 'TEXT':
-      return sendTextLLM(text)
-    case 'IMAGE':
-      return doImage(text)
-    case 'TTS':
-      return doTTS(text)
-    case 'VIDEO':
-      return doVideo(text)
-    default:
-      return sendTextLLM(text)
+  if (mediaMode.value === 'ASR') return // 转写要先选文件，走文件按钮
+
+  const intent = detectIntent(text)
+  if (intent === 'TEXT') return sendTextLLM(text)
+
+  const type = intent === 'TTS' ? 'AUDIO' : intent
+  if (!hasCapability(type)) return pushMissingHint(intent, text)
+  if (!(await ensureActive(type))) return pushMissingHint(intent, text)
+
+  switch (intent) {
+    case 'IMAGE': return doImage(text)
+    case 'TTS':   return doTTS(text)
+    case 'VIDEO': return doVideo(text)
+    default:      return sendTextLLM(text)
   }
 }
 
@@ -493,6 +589,13 @@ function sendDisabled() {
   if (mediaMode.value === 'ASR') return !asrFile.value
   return !input.value.trim()
 }
+
+/** 发送按钮文案：提前告诉用户这句话会被路由到哪个能力 */
+const sendLabel = computed(() => {
+  if (mediaMode.value === 'ASR') return loading.value ? '转写中…' : '开始转写'
+  if (loading.value) return '处理中…'
+  return { IMAGE: '生成图片', VIDEO: '生成视频', TTS: '开始朗读' }[detectIntent(input.value)] || '发送'
+})
 </script>
 
 <template>
@@ -502,25 +605,49 @@ function sendDisabled() {
       <span class="hint muted">回车发送 · Shift+回车换行</span>
     </div>
 
-    <!-- 模态选择器（顶栏新增） -->
-    <div class="modes">
-      <div
-        v-for="m in MODES"
-        :key="m.key"
-        class="mode"
-        :class="{ active: mediaMode === m.key }"
-        :title="m.hint"
-        @click="mediaMode = m.key"
-      >
-        <span class="mode-sym">{{ m.symbol }}</span>
-        <span class="mode-txt">{{ m.label }}</span>
+    <!-- 顶栏：一个模型下拉 + 转写入口；其余按输入内容自动路由 -->
+    <div class="model-bar">
+      <button class="model-picker" type="button" @click="modelMenuOpen = !modelMenuOpen">
+        <span class="mp-label">模型</span>
+        <span class="mp-name">{{ currentModelLabel }}</span>
+        <span class="mp-caret">▾</span>
+      </button>
+      <button
+        class="asr-btn"
+        type="button"
+        :class="{ active: mediaMode === 'ASR' }"
+        @click="mediaMode = mediaMode === 'ASR' ? 'AUTO' : 'ASR'"
+      >🎙 转写音频</button>
+      <span class="mp-hint muted">说「画…」「生成视频…」「朗读…」会自动调用对应模型</span>
+
+      <div v-if="modelMenuOpen" class="menu-mask" @click="modelMenuOpen = false"></div>
+      <div v-if="modelMenuOpen" class="model-menu">
+        <div v-for="grp in modelGroups" :key="grp.type" class="mg">
+          <div class="mg-title"><span class="cap-chip" :class="grp.key">{{ grp.label }}</span></div>
+          <div v-if="!grp.items.length" class="mg-empty">还没添加，去「设置 → AI 模型」添加</div>
+          <button
+            v-for="m in grp.items"
+            :key="m.id"
+            type="button"
+            class="mg-item"
+            :class="{ active: m.isActive }"
+            @click="selectModel(m)"
+          >
+            <span class="mg-name">{{ m.name }}</span>
+            <span class="mg-sub">{{ m.model || m.provider || '' }}<template v-if="m.isActive"> · 默认</template></span>
+          </button>
+        </div>
+        <div class="mg-foot">
+          <a href="#/settings" @click="modelMenuOpen = false">去设置添加 / 管理模型 →</a>
+        </div>
       </div>
     </div>
 
     <div class="chat-list" ref="listEl">
       <div v-if="!messages.length" class="empty muted">
         在下方输入，让大模型帮你规划{{ mode === 'WORK' ? '今天/明天的安排' : '这一餐吃什么' }}。<br/>
-        切到「🖼图片 / 🎬视频 / 🔊朗读 / 🎙转写」Tab 可调用对应模型。
+        直接说「画一只猫」「生成一段视频」「朗读这段话」，会自动调用对应模型；<br/>
+        还没配某类模型时，去「设置 → AI 模型」加一个就行。默认用顶部下拉选中的模型。
       </div>
       <div
         v-for="m in messages"
@@ -609,19 +736,14 @@ function sendDisabled() {
       <textarea
         v-else
         v-model="input"
-        :placeholder="
-          mediaMode === 'IMAGE' ? '请输入要生成的图片描述，如：一只戴着太阳镜的柯基在月球上奔跑，写实风格' :
-          mediaMode === 'TTS'   ? '请输入要朗读的文字…' :
-          mediaMode === 'VIDEO' ? '请输入要生成的视频描述，如：日落时分海浪拍打沙滩，电影感' :
-          placeholder
-        "
+        :placeholder="mediaMode === 'ASR' ? '（先选择一个音频文件）' : placeholder"
         rows="2"
         @keydown="onKey"
         :disabled="loading"
       ></textarea>
       <div class="actions">
         <button
-          v-if="mode === 'WORK' && (mediaMode === 'AUTO' || mediaMode === 'TEXT')"
+          v-if="mode === 'WORK' && mediaMode === 'AUTO'"
           class="parse"
           @click="parseCurrent"
           :disabled="parsing || !input.trim() || loading"
@@ -630,12 +752,7 @@ function sendDisabled() {
           {{ parsing ? '拆解中…' : '拆单' }}
         </button>
         <button v-if="loading" class="stop" @click="stop">中止</button>
-        <button class="send" @click="onMainBtnClick" :disabled="sendDisabled()">
-          {{ loading
-              ? (mediaMode === 'VIDEO' ? '生成中…' : mediaMode === 'IMAGE' ? '生图中…' : mediaMode === 'TTS' ? '合成中…' : mediaMode === 'ASR' ? '转写中…' : '思考中…')
-              : (mediaMode === 'ASR' ? '开始转写' : (mediaMode === 'IMAGE' ? '生成图片' : mediaMode === 'TTS' ? '开始朗读' : mediaMode === 'VIDEO' ? '生成视频' : '发送'))
-          }}
-        </button>
+        <button class="send" @click="onMainBtnClick" :disabled="sendDisabled()">{{ sendLabel }}</button>
       </div>
     </div>
   </section>
@@ -662,39 +779,76 @@ function sendDisabled() {
 .ttl { font-weight: 600; font-size: 15px; color: var(--text); }
 .hint { font-size: 12px; }
 
-/* 模态选择器 */
-.modes {
+/* 模型栏：一个下拉 + 转写入口，其余按内容自动路由 */
+.model-bar {
+  position: relative;
   display: flex;
-  gap: 6px;
-  padding: 10px 16px 8px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
   background: #FFFFFF;
   flex-shrink: 0;
 }
-.mode {
+.model-picker {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 12px;
+  gap: 6px;
+  padding: 6px 12px;
   font-size: 12.5px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: #FFFFFF;
-  color: var(--text-muted);
+  color: var(--text);
   cursor: pointer;
   white-space: nowrap;
-  user-select: none;
   transition: all 0.15s ease;
 }
-.mode:hover { border-color: var(--text); color: var(--text); }
-.mode.active {
-  background: var(--text);
-  color: #FFFFFF;
-  border-color: var(--text);
+.model-picker:hover { border-color: var(--text); }
+.mp-label { color: var(--text-muted); }
+.mp-name { font-weight: 600; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.mp-caret { color: var(--text-muted); font-size: 11px; }
+.asr-btn {
+  padding: 6px 12px; font-size: 12.5px; border: 1px solid var(--border);
+  border-radius: 999px; background: #FFFFFF; color: var(--text-muted);
+  cursor: pointer; white-space: nowrap; transition: all 0.15s ease;
 }
-.mode-sym { font-size: 13px; line-height: 1; }
-.mode-txt { font-weight: 500; }
+.asr-btn:hover { border-color: var(--text); color: var(--text); }
+.asr-btn.active { background: var(--text); border-color: var(--text); color: #FFFFFF; }
+.mp-hint { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.menu-mask { position: fixed; inset: 0; z-index: 20; background: transparent; }
+.model-menu {
+  position: absolute; left: 16px; top: 46px; z-index: 21;
+  width: 320px; max-height: 420px; overflow-y: auto;
+  background: #FFFFFF; border: 1px solid var(--border); border-radius: var(--radius-card);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12); padding: 10px 12px;
+}
+.mg { padding: 6px 0; border-bottom: 1px dashed var(--border); }
+.mg:last-of-type { border-bottom: none; }
+.mg-title { margin-bottom: 6px; }
+.mg-empty { font-size: 12px; color: var(--text-muted); padding: 2px 0; }
+.mg-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  width: 100%; text-align: left; padding: 6px 8px; margin-bottom: 4px;
+  border: 1px solid transparent; border-radius: 8px; background: #FAFAFA; cursor: pointer;
+}
+.mg-item:hover { border-color: var(--text); }
+.mg-item.active { background: #f2fbf4; border-color: var(--success); }
+.mg-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.mg-sub { font-size: 11.5px; color: var(--text-muted); }
+.mg-foot { padding: 8px 2px 2px; font-size: 12px; }
+.mg-foot a { color: var(--text); }
+
+.cap-chip {
+  display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+  color: var(--text); background: #F3F4F6; border: 1px solid var(--border);
+}
+.cap-chip.cap-text { background: #EEF4FF; border-color: #D7E3FB; color: #1d4ed8; }
+.cap-chip.cap-image { background: #FFF3E8; border-color: #FBD9BC; color: #b45309; }
+.cap-chip.cap-audio { background: #F1EEFF; border-color: #DCD3FB; color: #6d28d9; }
+.cap-chip.cap-video { background: #FEEEF0; border-color: #F9CCD3; color: #be123c; }
+.cap-chip.cap-embedding { background: #ECFAF2; border-color: #C7EED8; color: #15803d; }
 
 .chat-list {
   flex: 1;

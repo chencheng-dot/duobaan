@@ -226,7 +226,7 @@ async function addDocumentText(kb) {
     if (res.hint) {
       kbWarn.value = res.hint
     } else if (res.embeddingReady === false) {
-      kbWarn.value = '分块已入库但向量化未就绪，检索暂不可用：请到「设置 → 向量化模型」配置独立的 embedding（Base URL + Key + 模型）后点「重建向量」。'
+      kbWarn.value = '分块已入库但向量化未就绪，检索暂不可用：请到「设置 → AI 模型」配置独立的 embedding（Base URL + Key + 模型）后点「重建向量」。'
     }
     await Promise.all([loadKbs(), loadChunks(kb.id)])
   } catch (e) {
@@ -247,7 +247,7 @@ async function uploadFile(kb, e) {
     if (res.hint) {
       kbWarn.value = res.hint
     } else if (res.embeddingReady === false) {
-      kbWarn.value = '文件已入库但向量化未就绪，检索暂不可用：请到「设置 → 向量化模型」配置后点「重建向量」。'
+      kbWarn.value = '文件已入库但向量化未就绪，检索暂不可用：请到「设置 → AI 模型」配置后点「重建向量」。'
     }
     await Promise.all([loadKbs(), loadChunks(kb.id)])
   } catch (err) {
@@ -271,7 +271,7 @@ async function clearChunks(kb) {
 async function doRevectorize(kb) {
   if (!kb.chunkCount) { kbError.value = '该知识库还没有分块'; return }
   if (!ragStatus.value.embeddingReady) {
-    kbError.value = '请先在「设置 → 向量化模型」配置 embedding，再执行重新向量化。'
+    kbError.value = '请先在「设置 → AI 模型」配置 embedding，再执行重新向量化。'
     return
   }
   revectorizing.value = true

@@ -11,6 +11,7 @@ import org.example.duobaan.model.ApiProfileType;
 import org.example.duobaan.model.dto.ApiProfileDTO;
 import org.example.duobaan.model.dto.ApiProfileInbound;
 import org.example.duobaan.model.dto.LlmConfigDTO;
+import org.example.duobaan.model.dto.ModelsOverview;
 import org.example.duobaan.model.dto.WeatherConfigDTO;
 import org.example.duobaan.service.ApiProfileService;
 import org.example.duobaan.service.ConfigService;
@@ -59,6 +60,19 @@ public class ConfigController {
     @GetMapping("/providers/all")
     public Map<ApiProfileType, List<ConfigService.ProviderPreset>> getProvidersAll() {
         return configService.getProviderPresetsByType();
+    }
+
+    /**
+     * 设置页 / 聊天页「模型总览」：一次返回 AI 能力配置（文本/图片/语音/视频/向量化）与天气模型。
+     *
+     * <p>前端设置页由此渲染统一列表，聊天页由此渲染模型下拉与能力路由判断；
+     * 返回的 Key 全部是打码版，明文只在后端使用。
+     */
+    @GetMapping("/models")
+    public ModelsOverview models() {
+        return new ModelsOverview(
+                apiProfileService.listAiProfiles(),
+                apiProfileService.list(ApiProfileType.WEATHER));
     }
 
     // ==================================================================

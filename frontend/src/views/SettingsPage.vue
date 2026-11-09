@@ -2,21 +2,25 @@
 import { ref, onMounted, computed, reactive, watch } from 'vue'
 import {
   getLlmConfig, saveLlmConfig, getAllProviders,
-  getWeatherConfig,
+  getWeatherConfig, getModelsOverview,
   listApiProfiles, createApiProfile, updateApiProfile, activateApiProfile, deleteApiProfile
 } from '../api'
 
-// ====================== 6 个 Tab 元数据（数据驱动 → 通用表单/保存/激活/删除）======================
-const TAB_DEFS = [
-  { key: 'text',      type: 'LLM',       label: '文本模型',   symbol: '💬', nameHint: '如 个人对话-4o' },
-  { key: 'image',     type: 'IMAGE',     label: '图片模型',   symbol: '🎨', nameHint: '如 DALL·E 3 官方' },
-  { key: 'audio',     type: 'AUDIO',     label: '语音模型',   symbol: '🎵', nameHint: '如 TTS+Whisper' },
-  { key: 'video',     type: 'VIDEO',     label: '视频模型',   symbol: '🎬', nameHint: '如 Seedance 官方' },
-  { key: 'embedding', type: 'EMBEDDING', label: '向量化模型', symbol: '🧮', nameHint: '如 千问 text-embedding' },
-  { key: 'weather',   type: 'WEATHER',   label: '天气服务',   symbol: '⛅', nameHint: '如 默认北京' }
+// ====================== AI 能力元数据（数据驱动 → 统一列表 / 表单 / 保存）======================
+// 设置页把 5 种 AI 能力放进同一个列表，每条用「能力」标签区分；天气模型单独一块。
+// key 与 g 的状态键一致，type 与后端 ApiProfileType 一致。
+const CAP_DEFS = [
+  { key: 'text',      type: 'LLM',       label: '文本',   hint: '对话 / 拆单 / 写作',        symbol: '💬', nameHint: '如 个人对话-4o',            timeout: 30 },
+  { key: 'image',     type: 'IMAGE',     label: '图片',   hint: '文生图',                    symbol: '🎨', nameHint: '如 DALL·E 3 官方',          timeout: 60 },
+  { key: 'audio',     type: 'AUDIO',     label: '语音',   hint: '朗读 / 转写',               symbol: '🎵', nameHint: '如 TTS+Whisper',            timeout: 30 },
+  { key: 'video',     type: 'VIDEO',     label: '视频',   hint: '文生视频',                  symbol: '🎬', nameHint: '如 Seedance 官方',          timeout: 180 },
+  { key: 'embedding', type: 'EMBEDDING', label: '向量化', hint: '知识库检索',                symbol: '🧮', nameHint: '如 千问 text-embedding',    timeout: 30 }
 ]
+// 表单当前处在哪一类能力上（添加 / 编辑共用同一套表单）
 const tab = ref('text')
-const activeTab = computed(() => TAB_DEFS.find(t => t.key === tab.value))
+// 表单是否展开：默认收起，点「+ 添加模型」或「编辑」才展开
+const formOpen = ref(false)
+const activeTab = computed(() => CAP_DEFS.find(t => t.key === tab.value) || CAP_DEFS[0])
 
 // providersAll = { LLM: [...], IMAGE: [...], AUDIO: [...], VIDEO: [...], WEATHER: [...] }
 const providersAll = ref({})
@@ -35,6 +39,8 @@ const g = reactive({
   video:     makeGenericState({ timeoutSeconds: 180 }),     // 视频：默认 180s
   embedding: makeGenericState()
 })
+// 编辑已有配置时不允许改能力类型（改类型等于把 Key 挪到另一类，容易误配置）
+const editingExisting = computed(() => !!g[tab.value]?.editingId)
 
 // 天气独立（字段不一样：apiHost / location / cacheTtl）
 const weather = reactive({
@@ -142,6 +148,62 @@ const currentGeneric = computed(() => {
 })
 const currentType = computed(() => activeTab.value?.type)
 const currentProviders = computed(() => providersAll.value[currentType.value] || [])
+
+// 统一列表：5 类 AI 能力平铺，卡片带能力标签（天气不在此列表，单独一块）
+const allAiProfiles = computed(() => CAP_DEFS.flatMap(c =>
+  (g[c.key].profiles || []).map(p => ({ ...p, capKey: c.key, capLabel: c.label, capHint: c.hint }))
+))
+
+// ====================== 添加 / 编辑 / 取消 ======================
+/** 点「+ 添加模型」：展开表单并把能力切到指定项（默认文本） */
+function startAdd(key = 'text') {
+  const cap = CAP_DEFS.find(c => c.key === key) || CAP_DEFS[0]
+  // 清掉所有类型的编辑态，避免多个 Tab 同时残留 editingId 造成保存串类型
+  CAP_DEFS.forEach(c => { g[c.key].editingId = null })
+  tab.value = cap.key
+  const s = g[cap.key]
+  s.form.name = ''
+  s.form.apiKey = ''
+  s.form.timeoutSeconds = cap.timeout
+  applyPresetTo(cap.key, (providersAll.value[cap.type] || [])[0]?.code || '', true)
+  formOpen.value = true
+  s.saved = false
+}
+/** 点卡片上的「编辑」：按该条配置的真实类型打开表单 */
+function editProfileCard(p) {
+  const cap = CAP_DEFS.find(c => c.type === p.profileType) || CAP_DEFS[0]
+  tab.value = cap.key
+  g[cap.key].editingId = p.id
+  const s = g[cap.key]
+  s.form.name = p.name || ''
+  s.form.providerCode = p.provider || ''
+  s.form.baseUrl = p.baseUrl || ''
+  s.form.apiKey = ''
+  s.form.model = p.model || ''
+  s.form.timeoutSeconds = p.timeoutSeconds || cap.timeout
+  formOpen.value = true
+  s.saved = false
+}
+/** 切换能力类型：编辑已有配置时禁止（避免把 Key 写到错误类型下） */
+function switchCap(key) {
+  if (editingExisting.value || key === tab.value) return
+  const cap = CAP_DEFS.find(c => c.key === key)
+  if (!cap) return
+  tab.value = key
+  const s = g[key]
+  s.form.name = ''
+  s.form.apiKey = ''
+  s.form.timeoutSeconds = cap.timeout
+  applyPresetTo(key, (providersAll.value[cap.type] || [])[0]?.code || '', true)
+}
+function cancelForm() {
+  g[tab.value].editingId = null
+  formOpen.value = false
+}
+function capLabelOf(type) {
+  const c = CAP_DEFS.find(x => x.type === type)
+  return c ? c.label : String(type || '')
+}
 
 // 正在编辑的配置「已保存的 Key（打码版）」，只用于给用户看当前生效的是哪把 Key。
 // 输入框始终保持为空 = 不修改，绝不把打码值塞进输入框（塞了就会被当真 Key 提交）。
@@ -263,7 +325,7 @@ function applyActiveWeather(list) {
 }
 
 function applyPresetTo(key, code, silent = false) {
-  const type = TAB_DEFS.find(t => t.key === key)?.type
+  const type = CAP_DEFS.find(t => t.key === key)?.type
   const presets = providersAll.value[type] || []
   const preset = presets.find(p => p.code === code)
   const s = g[key]
@@ -317,34 +379,16 @@ async function saveGeneric() {
   }
 }
 
-async function activateGeneric(id) {
-  const type = currentType.value, s = currentGeneric.value
+/** 设为某能力在聊天页的默认模型（同一能力只会有一条 isActive=true） */
+async function activateGeneric(key, id) {
+  const type = CAP_DEFS.find(t => t.key === key)?.type
+  if (!type) { errorMsg.value = '激活失败：未知的模型类型'; return }
   try {
     await activateApiProfile(id)
-    s.profiles = await listApiProfiles(type)
-    const p = s.profiles.find(q => q.id === id)
-    if (p) {
-      s.editingId = p.id
-      s.form.name = p.name || ''
-      s.form.providerCode = p.provider || s.form.providerCode
-      s.form.baseUrl = p.baseUrl || ''
-      s.form.model = p.model || ''
-      s.form.timeoutSeconds = p.timeoutSeconds || 30
-    }
-    s.saved = true
-    setTimeout(() => { s.saved = false }, 1800)
+    g[key].profiles = await listApiProfiles(type)
+    g[key].saved = true
+    setTimeout(() => { g[key].saved = false }, 1800)
   } catch (e) { errorMsg.value = '激活失败：' + e.message }
-}
-
-function editGenericProfile(p) {
-  const s = currentGeneric.value
-  s.editingId = p.id
-  s.form.name = p.name || ''
-  s.form.providerCode = p.provider || ''
-  s.form.baseUrl = p.baseUrl || ''
-  s.form.apiKey = ''
-  s.form.model = p.model || ''
-  s.form.timeoutSeconds = p.timeoutSeconds || 30
 }
 
 // ====================== 天气保存/激活/编辑 ======================
@@ -430,7 +474,7 @@ async function confirmDelete() {
   try {
     await deleteApiProfile(id)
     if (type !== 'weather') {
-      const def = TAB_DEFS.find(t => t.key === type)
+      const def = CAP_DEFS.find(t => t.key === type)
       g[type].profiles = await listApiProfiles(def.type)
       if (g[type].editingId === id) {
         g[type].editingId = null
@@ -449,16 +493,6 @@ async function confirmDelete() {
   }
 }
 
-// Tab 上的"绿点"表示某一类已经有 active profile
-const readyState = computed(() => ({
-  text:      g.text.profiles.some(p => p.isActive),
-  image:     g.image.profiles.some(p => p.isActive),
-  audio:     g.audio.profiles.some(p => p.isActive),
-  video:     g.video.profiles.some(p => p.isActive),
-  embedding: g.embedding.profiles.some(p => p.isActive),
-  weather:   weather.profiles.some(p => p.isActive)
-}))
-
 watch(errorMsg, (v) => { if (v) setTimeout(() => { errorMsg.value = '' }, 5000) })
 
 onMounted(loadAll)
@@ -473,27 +507,80 @@ onMounted(loadAll)
       <div class="title-line"></div>
     </section>
 
-    <!-- 5 Tab：每个带绿点（ready=true 显示） -->
-    <div class="tabs">
-      <div
-        v-for="t in TAB_DEFS"
-        :key="t.key"
-        class="tab"
-        :class="{ active: tab === t.key }"
-        @click="tab = t.key"
-      >
-        <span class="tab-symbol">{{ t.symbol }}</span>
-        {{ t.label }}
-        <span class="dot" v-if="readyState[t.key]"></span>
+    <!-- ============ AI 模型接口：一个统一列表，每条卡片标注能力 ============ -->
+    <section class="section-head" v-if="!loading">
+      <div class="section-text">
+        <h2 class="section-title">AI 模型接口</h2>
+        <p class="section-sub">
+          添加过的模型都会出现在这里，也会出现在聊天页顶部的模型下拉里。
+          聊天时按你的话自动调用对应能力；某种能力还没添加时，助手会直接提醒你去补。
+        </p>
       </div>
-    </div>
+      <button class="add-model-btn" @click="startAdd()">＋ 添加模型</button>
+    </section>
+
+    <section class="info-card" v-if="!loading">
+      <div v-if="!allAiProfiles.length" class="empty-models">
+        还没有添加任何 AI 模型。点右上角「＋ 添加模型」，先选能力（文本 / 图片 / 语音 / 视频 / 向量化），
+        再填 Base URL、API Key 和模型 ID 就能用了。
+      </div>
+      <div class="profile-list" v-else>
+        <div
+          v-for="p in allAiProfiles"
+          :key="p.id"
+          class="profile-card"
+          :class="{ active: p.isActive }"
+        >
+          <div class="profile-head">
+            <div class="profile-name">
+              <span class="cap-chip" :class="'cap-' + p.capKey">{{ p.capLabel }}</span>
+              <span class="pname">{{ p.name }}</span>
+              <span v-if="p.isActive" class="badge badge-active">聊天页默认</span>
+            </div>
+            <div class="profile-actions">
+              <button v-if="!p.isActive" class="mini-btn" @click="activateGeneric(p.capKey, p.id)">设为默认</button>
+              <button class="mini-btn" @click="editProfileCard(p)">编辑</button>
+              <button class="mini-btn danger" @click="askDelete(p.capKey, p)">删除</button>
+            </div>
+          </div>
+          <div class="profile-body">
+            <div class="profile-meta"><span class="k">提供商</span><span class="v">{{ p.provider || '—' }}</span></div>
+            <div class="profile-meta"><span class="k">模型</span><span class="v mono">{{ p.model || '—' }}</span></div>
+            <div class="profile-meta"><span class="k">Base URL</span><span class="v mono">{{ p.baseUrl || '—' }}</span></div>
+            <div class="profile-meta"><span class="k">Key</span><span class="v mono muted">{{ p.apiKeyMasked }}</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <div v-if="loading" class="loading-state">加载中…</div>
 
     <!-- ========================================================= -->
     <!-- 通用模态 Tab（文本 / 图片 / 语音 / 视频）结构完全一致   -->
     <!-- ========================================================= -->
-    <template v-if="currentGeneric && !loading">
+    <template v-if="formOpen && currentGeneric && !loading">
+      <section class="config-card">
+        <div class="card-head-row">
+          <h2 class="card-title">{{ editingExisting ? '编辑模型' : '添加模型' }}</h2>
+          <button class="mini-btn" @click="cancelForm">取消</button>
+        </div>
+        <p class="card-subtitle">先选能力，再选提供商 —— 预设会自动填好 Base URL 和默认模型。</p>
+        <div class="cap-row">
+          <button
+            v-for="c in CAP_DEFS"
+            :key="c.key"
+            type="button"
+            class="cap-btn"
+            :class="{ active: tab === c.key }"
+            :disabled="editingExisting && tab !== c.key"
+            @click="switchCap(c.key)"
+          >
+            <span class="cap-name">{{ c.symbol }} {{ c.label }}</span>
+            <span class="cap-hint">{{ c.hint }}</span>
+          </button>
+        </div>
+      </section>
+
       <section class="config-card">
         <h2 class="card-title">选择提供商</h2>
         <div class="provider-grid">
@@ -561,43 +648,11 @@ onMounted(loadAll)
 
       <div class="save-area">
         <button class="save-btn" @click="saveGeneric" :disabled="currentGeneric.saving">
-          {{ currentGeneric.saving ? '保存中…' : `保存${activeTab.label}并启用` }}
+          {{ currentGeneric.saving ? '保存中…' : (editingExisting ? '保存修改' : '保存并设为默认') }}
         </button>
-        <div v-if="currentGeneric.saved" class="save-success">配置已保存并设为「使用中」</div>
+        <button class="mini-btn" type="button" @click="cancelForm">取消</button>
+        <div v-if="currentGeneric.saved" class="save-success">已保存{{ activeTab.label }}模型，并设为聊天页默认</div>
       </div>
-
-      <section class="info-card" v-if="currentGeneric.profiles.length">
-        <h2 class="card-title">已保存的{{ activeTab.label }}（{{ currentGeneric.profiles.length }}）</h2>
-        <div class="profile-list">
-          <div
-            v-for="p in currentGeneric.profiles"
-            :key="p.id"
-            class="profile-card"
-            :class="{ active: p.isActive, editing: currentGeneric.editingId === p.id }"
-          >
-            <div class="profile-head">
-              <div class="profile-name">
-                <span class="pname">{{ p.name }}</span>
-                <span v-if="p.isActive" class="badge badge-active">使用中</span>
-                <span v-if="currentGeneric.editingId === p.id" class="badge badge-edit">编辑中</span>
-              </div>
-              <div class="profile-actions">
-                <button v-if="!p.isActive" class="mini-btn" @click="activateGeneric(p.id)">设为默认</button>
-                <button class="mini-btn" @click="editGenericProfile(p)">编辑</button>
-                <button class="mini-btn danger" @click="askDelete(tab, p)">删除</button>
-              </div>
-            </div>
-            <div class="profile-body">
-              <div class="profile-meta"><span class="k">提供商</span><span class="v">{{ p.provider || '—' }}</span></div>
-              <div class="profile-meta"><span class="k">Base URL</span><span class="v mono">{{ p.baseUrl || '—' }}</span></div>
-              <div class="profile-meta"><span class="k">模型</span><span class="v mono">{{ p.model || '—' }}</span></div>
-              <div class="profile-meta"><span class="k">Key</span><span class="v mono muted">{{ p.apiKeyMasked }}</span></div>
-              <div class="profile-meta"><span class="k">超时</span><span class="v">{{ p.timeoutSeconds ? p.timeoutSeconds + ' 秒' : '—' }}</span></div>
-              <div class="profile-meta"><span class="k">更新</span><span class="v muted">{{ p.updatedAt }}</span></div>
-            </div>
-          </div>
-        </div>
-      </section>
 
       <section class="info-card">
         <h2 class="card-title">{{ activeTab.label }}说明</h2>
@@ -636,10 +691,15 @@ onMounted(loadAll)
       </section>
     </template>
 
-    <!-- ========================================================= -->
-    <!-- 天气 Tab（保留原有详细说明和风控制台 3 个 API 勾选清单）  -->
-    <!-- ========================================================= -->
-    <template v-if="tab==='weather' && !loading">
+    <!-- ============ 天气模型：独立一块（不参与聊天页能力路由） ============ -->
+    <section class="section-head weather-head" v-if="!loading">
+      <div class="section-text">
+        <h2 class="section-title">天气模型</h2>
+        <p class="section-sub">和风天气：首页与聊天页的天气卡片都从这里取数，填一次就够。</p>
+      </div>
+    </section>
+
+    <template v-if="!loading">
       <section class="config-card">
         <h2 class="card-title">和风天气</h2>
         <div class="config-item">
@@ -776,6 +836,40 @@ onMounted(loadAll)
 .title-text h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
 .title-text .sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
 .title-line { flex: 1; height: 1px; background: var(--border); }
+
+/* ===== 统一模型列表：AI 模型接口 / 天气模型 ===== */
+.section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-top: 4px; }
+.section-title { font-size: 16px; font-weight: 600; }
+.section-sub { font-size: 12px; color: var(--text-muted); margin-top: 6px; line-height: 1.6; max-width: 560px; }
+.weather-head { margin-top: 12px; }
+.add-model-btn {
+  flex-shrink: 0; padding: 9px 18px; font-size: 13px; font-weight: 500;
+  border: 1px dashed var(--text); border-radius: var(--radius);
+  background: #FFFFFF; color: var(--text); cursor: pointer; transition: background 0.12s;
+}
+.add-model-btn:hover { background: #F7F7F7; }
+.empty-models { font-size: 13px; color: var(--text-muted); line-height: 1.8; padding: 6px 2px; }
+.cap-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.cap-btn {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: #FFFFFF; cursor: pointer; transition: all 0.12s; font-size: 13px; color: var(--text);
+}
+.cap-btn:hover:not(:disabled) { border-color: var(--text); }
+.cap-btn.active { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
+.cap-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.cap-btn .cap-hint { font-size: 11px; color: var(--text-muted); }
+.cap-chip {
+  display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+  color: var(--text); background: #F3F4F6; border: 1px solid var(--border);
+}
+.cap-chip.cap-text { background: #EEF4FF; border-color: #D7E3FB; color: #1d4ed8; }
+.cap-chip.cap-image { background: #FFF3E8; border-color: #FBD9BC; color: #b45309; }
+.cap-chip.cap-audio { background: #F1EEFF; border-color: #DCD3FB; color: #6d28d9; }
+.cap-chip.cap-video { background: #FEEEF0; border-color: #F9CCD3; color: #be123c; }
+.cap-chip.cap-embedding { background: #ECFAF2; border-color: #C7EED8; color: #15803d; }
+.card-head-row { display: flex; align-items: center; justify-content: space-between; }
+.card-head-row .card-title { margin-bottom: 0; }
 
 .tabs { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 1px solid var(--border); }
 .tab {

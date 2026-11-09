@@ -322,10 +322,10 @@ public class LlmGatewayService {
         return new ChatResponse(degradedHint(mode), true);
     }
 
-    /** 未配置大模型的直白提示 */
+    /** 未配置大模型的直白提示（与设置页「AI 模型」的说法保持一致） */
     private String degradedHint(ChatMode mode) {
         String scene = (mode == ChatMode.WORK) ? "办公助手" : "美食推荐";
-        return "⚠️ 未配置大模型，请先到「设置」页面选择厂商并填写 API Key，即可使用" + scene + "功能。";
+        return "你还没有「文本模型」哦～ 去「设置 → AI 模型」添加一个文本模型并填好 API Key，就能使用" + scene + "了。";
     }
 
     /** 把 HTTP 状态码翻译成人话错误 */

@@ -50,8 +50,27 @@ public class ApiProfileService {
 
     // =================== 对外 list/get（返回打码版） ===================
 
+    /** 设置页「AI 模型」统一列表包含的能力类型；天气模型单独一块，不在此列 */
+    private static final List<ApiProfileType> AI_TYPES = List.of(
+            ApiProfileType.LLM,
+            ApiProfileType.IMAGE,
+            ApiProfileType.AUDIO,
+            ApiProfileType.VIDEO,
+            ApiProfileType.EMBEDDING);
+
     public List<ApiProfileDTO> list(ApiProfileType type) {
         return repo.findByProfileTypeOrderByUpdatedAtDesc(type)
+                .stream()
+                .map(ApiProfileService::toMaskedDTO)
+                .toList();
+    }
+
+    /**
+     * 一次取出全部 AI 能力配置（文本/图片/语音/视频/向量化），按类型分组、组内按更新时间倒序。
+     * 只返回打码 DTO，明文 Key 不离开本服务。
+     */
+    public List<ApiProfileDTO> listAiProfiles() {
+        return repo.findByProfileTypeInOrderByProfileTypeAscUpdatedAtDesc(AI_TYPES)
                 .stream()
                 .map(ApiProfileService::toMaskedDTO)
                 .toList();

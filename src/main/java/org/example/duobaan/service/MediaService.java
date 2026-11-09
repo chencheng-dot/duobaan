@@ -95,7 +95,7 @@ public class MediaService {
         Optional<ApiProfile> opt = apiProfileService.getActivePlain(ApiProfileType.IMAGE);
         if (opt.isEmpty() || !StringUtils.hasText(opt.get().getApiKey())) {
             return MediaResponse.error("IMAGE",
-                    "⚠️ 未配置「图片模型」，请先到「设置 → 图片模型」选厂商填 Key 并点击「使用」。");
+                    "你还没有「图片模型」哦～ 去「设置 → AI 模型」添加一个图片模型（如 DALL·E 3 / Seedream / 万相），就能画图了。");
         }
         ApiProfile p = opt.get();
         int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0
@@ -243,7 +243,7 @@ public class MediaService {
         Optional<ApiProfile> opt = apiProfileService.getActivePlain(ApiProfileType.AUDIO);
         if (opt.isEmpty() || !StringUtils.hasText(opt.get().getApiKey())) {
             return MediaResponse.error("AUDIO_TTS",
-                    "⚠️ 未配置「语音模型」，请先到「设置 → 语音模型」选厂商填 Key 并点击「使用」。");
+                    "你还没有「语音模型」哦～ 去「设置 → AI 模型」添加一个语音模型，就能把文字念出来了。");
         }
         ApiProfile p = opt.get();
         int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0
@@ -348,7 +348,7 @@ public class MediaService {
         Optional<ApiProfile> opt = apiProfileService.getActivePlain(ApiProfileType.AUDIO);
         if (opt.isEmpty() || !StringUtils.hasText(opt.get().getApiKey())) {
             return MediaResponse.error("AUDIO_ASR",
-                    "⚠️ 未配置「语音模型」，请先到「设置 → 语音模型」填 Key（ASR 使用 whisper-1 或 paraformer-v2 系列模型）。");
+                    "你还没有「语音模型」哦～ 去「设置 → AI 模型」添加一个语音模型（ASR 可用 whisper-1 或 paraformer-v2 系列），就能转写音频了。");
         }
         ApiProfile p = opt.get();
         int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0
@@ -432,7 +432,7 @@ public class MediaService {
         Optional<ApiProfile> opt = apiProfileService.getActivePlain(ApiProfileType.VIDEO);
         if (opt.isEmpty() || !StringUtils.hasText(opt.get().getApiKey())) {
             return MediaResponse.error("VIDEO",
-                    "⚠️ 未配置「视频模型」，请先到「设置 → 视频模型」选厂商（如 Seedance/可灵/万相）填 Key 并点击「使用」。");
+                    "你还没有「视频模型」哦～ 去「设置 → AI 模型」添加一个视频模型（如 Seedance / 可灵 / 万相），就能生成视频了。");
         }
         ApiProfile p = opt.get();
         int timeout = p.getTimeoutSeconds() != null && p.getTimeoutSeconds() > 0

@@ -143,6 +143,13 @@ export const deleteApiProfile = (id) =>
 /** 多模态统一拉取 5 类（LLM/IMAGE/AUDIO/VIDEO/WEATHER）厂商预设，前端设置页按 Tab 渲染 */
 export const getAllProviders = () => json(`${BASE}/config/providers/all`)
 
+/**
+ * 模型总览：一次拿回 AI 模型（文本/图片/语音/视频/向量化）与天气模型。
+ * 设置页用它渲染统一列表，聊天页用它渲染模型下拉 + 判断某能力有没有配置。
+ * 返回体：{ ai: ApiProfileDTO[], weather: ApiProfileDTO[] }，Key 均为打码版。
+ */
+export const getModelsOverview = () => json(`${BASE}/config/models`)
+
 // === 多模态生成接口：/api/media/* ===
 /** 文生图：{prompt, size, n, style, quality, mode} */
 export const generateImage = (body) =>
