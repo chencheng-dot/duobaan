@@ -12,6 +12,7 @@ import org.example.duobaan.model.TaskGroup;
 import org.example.duobaan.model.TaskSource;
 import org.example.duobaan.model.TaskStatus;
 import org.example.duobaan.model.dto.MineTasksResponse;
+import org.example.duobaan.model.dto.TaskHistoryItem;
 import org.example.duobaan.model.dto.TaskPatch;
 import org.example.duobaan.model.dto.TaskRequest;
 import org.example.duobaan.model.dto.TaskSummary;
@@ -37,7 +38,12 @@ public class TaskService {
 
     private static final Logger log = LoggerFactory.getLogger(TaskService.class);
 
-    private static final int HISTORY_LIMIT = 500;
+    /**
+     * 「我的」三栏历史的单栏上限。三栏各取最近 500 条，防止历史页随使用时间无限膨胀；
+     * 达到上限时仅记录可观测日志，不改变返回语义（前端按 500 条展示即可）。
+     * 包级可见，便于单测引用同一常量，避免测试里再写一个魔法数字。
+     */
+    static final int HISTORY_LIMIT = 500;
 
     /** 标题长度上限，与 task.title VARCHAR(200) 及 TaskRequest 上的 @Size 保持一致 */
     private static final int TITLE_MAX_LENGTH = 200;
@@ -265,13 +271,37 @@ public class TaskService {
 
     /**
      * 「我的」Tab 三栏历史：已上交 / 已完成 / 已删除。
-     * 通过 historyRepo 原生 SQL 绕过 @SQLRestriction，能看到软删除的行。
+     *
+     * <p>三栏都走 {@link TaskHistoryRepository} 的原生 SQL，绕过 {@code @SQLRestriction}，
+     * 因此能看到软删除行。已上交 / 已完成两栏<b>不过滤 deleted</b>：任务删除后仍保留在历史里，
+     * 由 DTO 的 {@code deleted} 标记让前端打「已删除」标；否则删掉一条任务，当天上交明细就少一条。
+     *
+     * <p>只读事务：三张查询只读不写，标 readOnly 既表达意图，也让连接池走只读连接。
      */
+    @Transactional(readOnly = true)
     public MineTasksResponse mineHistory() {
-        return new MineTasksResponse(
-                historyRepo.findSubmittedTasks(HISTORY_LIMIT),
-                historyRepo.findDoneTasks(HISTORY_LIMIT),
-                historyRepo.findDeletedTasks(HISTORY_LIMIT)
-        );
+        List<TaskHistoryItem> submitted = TaskHistoryItem.fromAll(historyRepo.findSubmittedTasks(HISTORY_LIMIT));
+        List<TaskHistoryItem> done = TaskHistoryItem.fromAll(historyRepo.findDoneTasks(HISTORY_LIMIT));
+        List<TaskHistoryItem> deleted = TaskHistoryItem.fromAll(historyRepo.findDeletedTasks(HISTORY_LIMIT));
+
+        // 关键业务埋点：三栏条数与其中「已删除」的条数，出问题时能一眼分清是数据被过滤还是真没数据。
+        long submittedDeleted = submitted.stream().filter(TaskHistoryItem::deleted).count();
+        long doneDeleted = done.stream().filter(TaskHistoryItem::deleted).count();
+        if (log.isDebugEnabled()) {
+            log.debug("[TaskHistory] 我的历史：已上交 {}（含已删除 {}）/ 已完成 {}（含已删除 {}）/ 已删除 {}",
+                    submitted.size(), submittedDeleted, done.size(), doneDeleted, deleted.size());
+        }
+        warnIfTruncated("已上交", submitted.size());
+        warnIfTruncated("已完成", done.size());
+        warnIfTruncated("已删除", deleted.size());
+
+        return new MineTasksResponse(submitted, done, deleted);
+    }
+
+    /** 单栏达到上限时提示可能被截断；这是可观测性信号，不改变返回结果。 */
+    private void warnIfTruncated(String column, int size) {
+        if (size >= HISTORY_LIMIT) {
+            log.warn("[TaskHistory] 「{}」栏已达到上限 {} 条，更早的历史本次未返回", column, HISTORY_LIMIT);
+        }
     }
 }

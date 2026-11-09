@@ -1,0 +1,9 @@
+# 测试环境 Mockito MockMaker 选择。
+#
+# 默认的 inline mock maker 依赖 Byte Buddy 运行时自附加 java agent；部分 JDK 17 发行版
+# （含本机）默认禁止 self-attach，表现为：
+#   MockitoInitializationException: Could not initialize inline Byte Buddy mock maker.
+#   It appears as if your JDK does not supply a working agent attachment mechanism.
+# 改用 subclass mock maker：不做 agent 附加，CI/本机行为一致。代价是无法 mock final 类/方法，
+# 本项目单测只 mock Repository 接口与普通 @Service 类，不受影响。
+mock-maker-subclass

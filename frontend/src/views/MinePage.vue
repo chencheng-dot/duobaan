@@ -71,12 +71,16 @@ onMounted(() => {
   loadKbData()
 })
 
-// 「我的 → 已删除」中的硬删除：物理移除，不可恢复
+// 「我的 → 已删除」中的硬删除：物理移除，不可恢复。
+// 已删除任务可能同时出现在「已上交」「已完成」两栏（历史留痕不按 deleted 过滤），
+// 因此物理删除后必须从三栏里都摘掉，否则切回那两栏会看到一条点进去 404 的幽灵记录。
 async function hardDelete(t) {
   if (!confirm(`确认彻底删除「${t.title}」？此操作不可恢复。`)) return
   try {
     await hardDeleteTask(t.id)
     data.value.deleted = data.value.deleted.filter((x) => x.id !== t.id)
+    data.value.submitted = data.value.submitted.filter((x) => x.id !== t.id)
+    data.value.done = data.value.done.filter((x) => x.id !== t.id)
   } catch (e) {
     errorMsg.value = '删除失败：' + e.message
   }
@@ -440,8 +444,8 @@ async function doRevectorize(kb) {
       <div v-else-if="errorMsg" class="empty-state error">{{ errorMsg }}</div>
       <template v-else>
         <div v-if="!currentList.length" class="empty-state">
-          <template v-if="tab === 'submitted'">还没有上交的任务。完成任务后点击「上交今日小结」会出现在这里。</template>
-          <template v-else-if="tab === 'done'">还没有已完成的任务。勾选任务完成状态后会出现在这里。</template>
+          <template v-if="tab === 'submitted'">还没有上交的任务。完成任务后点击「上交今日小结」会出现在这里；之后删除的任务也会保留并标注「已删除」。</template>
+          <template v-else-if="tab === 'done'">还没有已完成的任务。勾选任务完成状态后会出现在这里；之后删除的任务同样会保留。</template>
           <template v-else>还没有删除过的任务。删除的任务会保留在这里留痕，不会真的从数据库移除。</template>
         </div>
 
@@ -450,7 +454,7 @@ async function doRevectorize(kb) {
             v-for="t in sortedList"
             :key="t.id"
             class="task-card"
-            :class="'cat-' + (t.category || 'CUSTOM').toLowerCase()"
+            :class="['cat-' + (t.category || 'CUSTOM').toLowerCase(), { 'is-deleted': t.deleted }]"
           >
             <div class="task-head">
               <div class="task-title">{{ t.title }}</div>
@@ -459,8 +463,15 @@ async function doRevectorize(kb) {
                 <span class="tag grp-tag">{{ t.group === 'TODAY' ? '今日' : '明日' }}</span>
                 <span v-if="t.source === 'LLM'" class="tag src-tag">AI拆单</span>
                 <span v-else class="tag src-tag">手动</span>
-                <span v-if="tab === 'submitted'" class="tag st-tag submitted">已上交</span>
-                <span v-else-if="tab === 'done'" class="tag st-tag done">已完成</span>
+                <!-- 历史留痕：已删除的任务仍保留在「已上交/已完成」栏，额外打「已删除」标 -->
+                <template v-if="tab === 'submitted'">
+                  <span class="tag st-tag submitted">已上交</span>
+                  <span v-if="t.deleted" class="tag st-tag deleted">已删除</span>
+                </template>
+                <template v-else-if="tab === 'done'">
+                  <span class="tag st-tag done">已完成</span>
+                  <span v-if="t.deleted" class="tag st-tag deleted">已删除</span>
+                </template>
                 <span v-else class="tag st-tag deleted">已删除</span>
               </div>
             </div>
@@ -470,7 +481,7 @@ async function doRevectorize(kb) {
                 <span v-if="tab === 'submitted'" class="meta-item highlight">
                   <strong>上交：</strong>{{ fmtDate(t.submittedAt || t.createdAt) }}
                 </span>
-                <span v-if="tab === 'deleted'" class="meta-item danger">
+                <span v-if="tab === 'deleted' || t.deleted" class="meta-item danger">
                   <strong>删除：</strong>{{ fmtDate(t.deletedAt || t.createdAt) }}
                 </span>
                 <span v-if="t.estimatedMinutes" class="meta-item">
@@ -581,6 +592,8 @@ async function doRevectorize(kb) {
   transition: border-color 0.12s;
 }
 .task-card:hover { border-color: var(--text); }
+/* 已删除的历史任务：标题降一档灰度，配合「已删除」红标，扫列表时不会误当成有效记录 */
+.task-card.is-deleted .task-title { color: var(--text-muted); }
 
 .task-head {
   display: flex;
